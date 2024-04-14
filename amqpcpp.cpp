@@ -48,6 +48,8 @@ struct AmqpMessage
     std::string routingKey;
     std::string correlationId;
     std::string replyTo;
+    std::string subject;
+    std::string expiration;
     uint64_t ack;
 };
 
@@ -62,6 +64,7 @@ public:
         m_channel = new AMQP::TcpChannel(m_connection);
 
         m_channel->onError([this](const char* message) {
+            m_channelError = true;
             m_channelErrorMessage = message;
         });
     }
@@ -112,9 +115,12 @@ public:
         return true;
     }
 
-    void consume(const std::string& channelName) {
-        m_channel->consume(channelName)
+    void consume(const std::string& queueName, int flags) {
+        m_channel->consume(queueName, flags)
             .onReceived([this](const AMQP::Message &message, uint64_t deliveryTag, bool redelivered) {
+                const AMQP::Table& headers = message.headers();
+                const std::string& subject = headers["subject"];
+
                 AmqpMessagePtr amqpMessage = AmqpMessagePtr(new AmqpMessage);
                 amqpMessage->message = std::string(message.body(), message.bodySize());
                 amqpMessage->exchange = message.exchange();
@@ -122,6 +128,7 @@ public:
                 amqpMessage->replyTo = message.replyTo();
                 amqpMessage->correlationId = message.correlationID();
                 amqpMessage->ack = deliveryTag;
+                amqpMessage->subject = subject;
                 m_messages.push_back(amqpMessage);
             })
             .onSuccess([](const std::string &consumertag) {
@@ -140,7 +147,7 @@ public:
         return m_failed;
     }
 
-    std::string publishRPC(const std::string& exchange, const std::string& routingKey, const std::string& message) {
+    std::string publishRPC(const std::string& exchange, const std::string& routingKey, const std::string& message, const std::string& subject, const std::string& expiration) {
         enableReplyTo();
 
         std::string correlationId = generateUniqueString();
@@ -151,6 +158,8 @@ public:
             amqpMessage->exchange = exchange;
             amqpMessage->routingKey = routingKey;
             amqpMessage->correlationId = correlationId;
+            amqpMessage->expiration = expiration;
+            amqpMessage->subject = subject;
             m_preReplyToMessages.push_back(amqpMessage);
             return correlationId;
         }
@@ -158,6 +167,14 @@ public:
         AMQP::Envelope publishEnvelope(message);
         publishEnvelope.setReplyTo("amq.rabbitmq.reply-to");
         publishEnvelope.setCorrelationID(correlationId);
+
+        if(!expiration.empty())
+            publishEnvelope.setExpiration(expiration);
+
+        AMQP::Table headers;
+        headers["subject"] = subject;
+        publishEnvelope.setHeaders(headers);
+
         m_channel->publish(exchange, routingKey, publishEnvelope);
         return correlationId;
     }
@@ -173,27 +190,33 @@ public:
     std::list<AmqpMessagePtr>& getMessages() { return m_messages; }
     std::unordered_map<std::string, std::string>& getRPCMessages() { return m_rpcMessages; }
 
-    void declareExchange(const std::string& exchangeName, int mode) {
-        m_channel->declareExchange(exchangeName, AMQP::ExchangeType(mode));
+    void declareExchange(const std::string& exchangeName, int mode, int flags) {
+        m_channel->declareExchange(exchangeName, AMQP::ExchangeType(mode), flags);
     }
 
-    void declareQueue(const std::string& queueName) {
+    void declareQueue(const std::string& queueName, int flags) {
         AMQP::Table declareQueueArguments;
         //declareQueueArquments["x-queue-type"] = "quorum";
         declareQueueArguments["x-queue-version"] = 2;
-        m_channel->declareQueue(queueName, declareQueueArguments);
+        m_channel->declareQueue(queueName, flags, declareQueueArguments);
     }
 
     void bindQueue(const std::string& exchangeName, const std::string& queueName, const std::string& routingKey) {
         m_channel->bindQueue(exchangeName, queueName, routingKey);
     }
 
-    void publish(const std::string& exchange, const std::string& routingKey, const std::string& message, const std::string& correlationId) {
+    void publish(const std::string& exchange, const std::string& routingKey, const std::string& message, const std::string& subject, const std::string& correlationId, const std::string& expiration) {
         AMQP::Envelope publishEnvelope(message);
 
         if(!correlationId.empty())
             publishEnvelope.setCorrelationID(correlationId);
 
+        if(!expiration.empty())
+            publishEnvelope.setExpiration(expiration);
+
+        AMQP::Table headers;
+        headers["subject"] = subject;
+        publishEnvelope.setHeaders(headers);
         m_channel->publish(exchange, routingKey, publishEnvelope); // we don't need ack yet.
     }
 
@@ -215,6 +238,14 @@ private:
                     AMQP::Envelope publishEnvelope(preReplyToMessage->message);
                     publishEnvelope.setReplyTo("amq.rabbitmq.reply-to");
                     publishEnvelope.setCorrelationID(preReplyToMessage->correlationId);
+
+                    if(!preReplyToMessage->expiration.empty())
+                        publishEnvelope.setExpiration(preReplyToMessage->expiration);
+
+                    AMQP::Table headers;
+                    headers["subject"] = preReplyToMessage->subject;
+                    publishEnvelope.setHeaders(headers);
+
                     m_channel->publish(preReplyToMessage->exchange, preReplyToMessage->routingKey, publishEnvelope);
                 }
 
@@ -290,6 +321,7 @@ int amqp_init(lua_State *L)
 
 int amqp_consume(lua_State *L)
 {
+    int flags = lua_pop_number(L);
     std::string channelName = lua_pop_string(L);
     int id = lua_pop_number(L);
 
@@ -299,7 +331,7 @@ int amqp_consume(lua_State *L)
         return 0;
     }
 
-    amqp->consume(channelName);
+    amqp->consume(channelName, flags);
     return 0;
 }
 
@@ -360,12 +392,14 @@ int amqp_get_ready_message(lua_State *L)
     lua_pushstring(L, first->routingKey.c_str());
     lua_pushstring(L, first->replyTo.c_str());
     lua_pushstring(L, first->correlationId.c_str());
+    lua_pushstring(L, first->subject.c_str());
 
-    return 7;
+    return 8;
 }
 
 int amqp_declare_exchange(lua_State *L)
 {
+    int flags = lua_pop_number(L);
     int mode = lua_pop_number(L);
     std::string exchangeName = lua_pop_string(L);
     int id = lua_pop_number(L);
@@ -376,12 +410,13 @@ int amqp_declare_exchange(lua_State *L)
         return 0;
     }
 
-    amqp->declareExchange(exchangeName, mode);
+    amqp->declareExchange(exchangeName, mode, flags);
     return 0;
 }
 
 int amqp_declare_queue(lua_State *L)
 {
+    int flags = lua_pop_number(L);
     std::string queueName = lua_pop_string(L);
     int id = lua_pop_number(L);
 
@@ -391,7 +426,7 @@ int amqp_declare_queue(lua_State *L)
         return 0;
     }
 
-    amqp->declareQueue(queueName);
+    amqp->declareQueue(queueName, flags);
     return 0;
 }
 
@@ -452,12 +487,9 @@ int amqp_poll(lua_State *L)
 int amqp_publish(lua_State *L)
 {
     //todo: need to be more reliable
-    int size = lua_gettop(L);
-    std::string correlationId;
-
-    if(size > 4)
-        correlationId = lua_pop_string(L);
-
+    std::string expiration = lua_pop_string(L);
+    std::string correlationId = lua_pop_string(L);
+    std::string subject = lua_pop_string(L);
     std::string message = lua_pop_string(L);
     std::string routeId = lua_pop_string(L);
     std::string exchange = lua_pop_string(L);
@@ -469,12 +501,14 @@ int amqp_publish(lua_State *L)
         return 0;
     }
 
-    amqp->publish(exchange, routeId, message, correlationId);
+    amqp->publish(exchange, routeId, message, subject, correlationId, expiration);
     return 0;
 }
 
 int amqp_publish_rpc(lua_State *L)
 {
+    std::string expiration = lua_pop_string(L);
+    std::string subject = lua_pop_string(L);
     std::string message = lua_pop_string(L);
     std::string routeId = lua_pop_string(L);
     std::string exchange = lua_pop_string(L);
@@ -486,7 +520,7 @@ int amqp_publish_rpc(lua_State *L)
         return 0;
     }
 
-    std::string correlationId = amqp->publishRPC(exchange, routeId, message);
+    std::string correlationId = amqp->publishRPC(exchange, routeId, message, subject, expiration);
     lua_pushstring(L, correlationId.c_str());
     return 1;
 }

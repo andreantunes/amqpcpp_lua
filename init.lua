@@ -1,18 +1,19 @@
 local amqpcpp = require('amqpcpp')
 
-local p_rabbitConnections = { }
-
-local _consumeUntilFails
-local _consumeForever
 local _getPublishConnection
-local _publish
-local _publishRpc
-local _waitForAnswer
+local _getPublisher
 
-function _consumeUntilFails(queueName, onData, connectionConfig)
-  if not connectionConfig.host or 
-    not connectionConfig.port or 
-    not connectionConfig.username or 
+local p_publishConnections = { }
+local PublishClass = { }
+
+function _getPublisher(connectionConfig)
+  local t = {
+    connectionConfig = connectionConfig
+  }
+
+  if not connectionConfig.host or
+    not connectionConfig.port or
+    not connectionConfig.username or
     not connectionConfig.password or
     not connectionConfig.vhost then
 
@@ -20,86 +21,69 @@ function _consumeUntilFails(queueName, onData, connectionConfig)
     return
   end
 
-  local id = amqpcpp.init(connectionConfig.host, connectionConfig.port, connectionConfig.username, connectionConfig.password, connectionConfig.vhost)
-
-  if type(queueName) == 'table' then
-    for _, queueNameIt in ipairs(queueName) do
-      amqpcpp.declare_queue(id, queueNameIt)
-      amqpcpp.consume(id, queueNameIt)
-    end
-  else
-    amqpcpp.declare_queue(id, queueName)
-    amqpcpp.consume(id, queueName)
-  end
-
-  while true do
-    local ok, err = amqpcpp.poll(id)
-
-    if not ok then
-      print(err)
-      break 
-    end
-
-    local ok, msg, ack, exchange, routingKey, replyTo, correlationId = amqpcpp.get_ready_message(id)  
- 
-    while ok do
-      local callOk, errorOrResult = pcall(onData, msg, id, ack, exchange, routingKey, replyTo, correlationId)
-      if not callOk then
-        ngx.log(ngx.ERR, errorOrResult)
-        amqpcpp.reject(id, ack)
-
-      elseif errorOrResult == true then
-        amqpcpp.ack(id, ack)
-
-      else
-        amqpcpp.reject(id, ack)
-      end
-
-      ok, msg, ack, exchange, routingKey, replyTo, correlationId = amqpcpp.get_ready_message(id)
-    end
-
-    ngx.sleep(0.032)
-  end
-
-  amqpcpp.terminate(id)
+  setmetatable(t, { __index = PublishClass })
+  return t
 end
 
-function _consumeForever(queueName, onData, connectionConfig)
+function PublishClass:publish(exchange, routingKey, data, subject, correlationId, expirationMs)
+  local id = _getPublishConnection(self.connectionConfig)
+  amqpcpp.publish(id, exchange, routingKey, data, subject or "", correlationId or "", tostring(expirationMs or "") or "")
+end 
+
+function PublishClass:publishRpc(exchange, routingKey, data, subject, expirationMs)
+  local id = _getPublishConnection(self.connectionConfig)
+  local correlationId = amqpcpp.publish_rpc(id, exchange, routingKey, data, subject or "", tostring(expirationMs or ""))
+  return id, correlationId
+end
+
+function PublishClass:publishRpcAndWait(exchange, routingKey, data, subject, expirationMs)
+  local id = _getPublishConnection(self.connectionConfig)
+  local correlationId = amqpcpp.publish_rpc(id, exchange, routingKey, data, subject or "", tostring(expirationMs or ""))
+  return self:waitForRpcAnswer(id, correlationId, expirationMs)
+end
+
+function PublishClass:waitForRpcAnswer(connectionId, correlationId, expirationMs)
+  local timeout = ngx.now() * 1000 + expirationMs
+
   while true do
-    _consumeUntilFails(queueName, onData, connectionConfig)
-    ngx.sleep(5)
+    local amqpFailed, success, message = amqpcpp.get_rpc_message(connectionId, correlationId)
+  
+    if amqpFailed then
+      print("Connection failed, could not retrieve.")
+      return false  
+    end  
+  
+    if success then
+      return true, message
+    end 
+  
+    if ngx.now() * 1000 > timeout then
+      return false
+    end
+  
+    ngx.sleep(0.032)
   end
 end
 
 function _getPublishConnection(connectionConfig)
-  if not connectionConfig.host or 
-    not connectionConfig.port or 
-    not connectionConfig.username or 
-    not connectionConfig.password or
-    not connectionConfig.vhost then
-
-    ngx.log(ngx.ERR, "could not initialize rabbitmq, no config found.")
-    return
-  end
-
   local connectionHash = table.concat({ connectionConfig.host, connectionConfig.port, connectionConfig.username, connectionConfig.password, connectionConfig.vhost })
-  local id = p_rabbitConnections[connectionHash]
+  local id = p_publishConnections[connectionHash]
 
   if id and not amqpcpp.is_ok(id) then
     id = nil
-  end 
+  end
 
   if not id then
     id = amqpcpp.init(connectionConfig.host, connectionConfig.port, connectionConfig.username, connectionConfig.password, connectionConfig.vhost)
-    p_rabbitConnections[connectionHash] = id
+    p_publishConnections[connectionHash] = id
 
     ngx.timer.at(0.1, function()
       while true do
         local ok, err = amqpcpp.poll(id)
-
+ 
         if not ok then
           amqpcpp.terminate(id)
-          p_rabbitConnections[connectionHash] = nil
+          p_publishConnections[connectionHash] = nil
           ngx.log(ngx.ERR, err)
           break
         end
@@ -112,48 +96,80 @@ function _getPublishConnection(connectionConfig)
   return id
 end
 
-function _publish(exchange, routingKey, data, connectionConfig, config)
-  local id = _getPublishConnection(connectionConfig)
-  local correlationId = ""
+local _getConsumer
+local ConsumerClass = { }
 
-  if config then
-    correlationId = config.correlationId or ""
+function _getConsumer(connectionConfig)
+  local t = {
+    connectionConfig = connectionConfig,
+    bindings = { },
+    exchanges = { }
+  }
+
+  if not connectionConfig.host or
+    not connectionConfig.port or
+    not connectionConfig.username or
+    not connectionConfig.password or
+    not connectionConfig.vhost then
+
+    ngx.log(ngx.ERR, "could not initialize rabbitmq, no config found.")
+    return
   end
 
-  amqpcpp.publish(id, exchange, routingKey, data, correlationId)
+  setmetatable(t, { __index = ConsumerClass })
+  return t
 end
 
-function _publishRpc(exchange, routingKey, data, connectionConfig, config)
-  local id = _getPublishConnection(connectionConfig)
-  return id, amqpcpp.publish_rpc(id, exchange, routingKey, data)
-end 
+function ConsumerClass:loop(onData)
+  while true do
+    self:consumeUntilFails(onData)
+    ngx.sleep(5)
+  end
+end
 
-function _waitForAnswer(connectionId, correlationId, timeout)
-  local timeout = os.time() + timeout
-  
-  while true do 
-    local amqpFailed, success, message = amqpcpp.get_rpc_message(connectionId, correlationId)
-  
-    if amqpFailed then
-      print("Connection failed, could not retrieve.")
-      return false  
-    end  
- 
-    if success then
-      return true, message
-    end 
+function ConsumerClass:init(queueName, exchanges, bindings)
+  self.queueName = queueName
+end
 
-    if os.time() > timeout then
-      return false
+function ConsumerClass:consumeUntilFails(onData)
+  local id = amqpcpp.init(self.connectionConfig.host, self.connectionConfig.port, self.connectionConfig.username, self.connectionConfig.password, self.connectionConfig.vhost)
+
+  amqpcpp.declare_queue(id, self.queueName, 0)
+  amqpcpp.consume(id, self.queueName, 0)
+
+  while true do
+    local ok, err = amqpcpp.poll(id)
+
+    if not ok then
+      print(err)
+      break
+    end
+
+    local ok, msg, ack, exchange, routingKey, replyTo, correlationId, subject = amqpcpp.get_ready_message(id)
+
+    while ok do
+      local callOk, errorOrResult = pcall(onData, msg, subject, exchange, routingKey, replyTo, correlationId)
+      if not callOk then
+        ngx.log(ngx.ERR, errorOrResult)
+        amqpcpp.reject(id, ack)
+
+      elseif errorOrResult == true then
+        amqpcpp.ack(id, ack)
+
+      else
+        amqpcpp.reject(id, ack)
+      end
+
+      ok, msg, ack, exchange, routingKey, replyTo, correlationId, subject = amqpcpp.get_ready_message(id)
     end
 
     ngx.sleep(0.032)
   end
+
+  amqpcpp.terminate(id)
 end
 
 return {
-  consumeForever = _consumeForever,
-  publish = _publish,
-  publishRpc = _publishRpc,
-  waitForAnswer = _waitForAnswer
+  getPublisher = _getPublisher,
+  getConsumer = _getConsumer,
 }
