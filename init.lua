@@ -25,24 +25,37 @@ function _getPublisher(connectionConfig)
   return t
 end
 
-function PublishClass:publish(exchange, routingKey, data, subject, correlationId, expirationMs)
+local function _coPublish(premature, ...)
+  PublishClass.coPublish(...)
+end
+
+function PublishClass:asyncPublish(exchange, routingKey, data, subject, correlationId, expirationMs)
+  ngx.timer.at(0, _coPublish, self, exchange, routingKey, data, subject, correlationId, expirationMs)
+end 
+
+function PublishClass:coPublish(exchange, routingKey, data, subject, correlationId, expirationMs)
   local id = _getPublishConnection(self.connectionConfig)
   amqpcpp.publish(id, exchange, routingKey, data, subject or "", correlationId or "", tostring(expirationMs or "") or "")
 end 
 
-function PublishClass:publishRpc(exchange, routingKey, data, subject, expirationMs)
+function PublishClass:cpPublishRpc(exchange, routingKey, data, subject, expirationMs)
   local id = _getPublishConnection(self.connectionConfig)
   local correlationId = amqpcpp.publish_rpc(id, exchange, routingKey, data, subject or "", tostring(expirationMs or ""))
   return id, correlationId
 end
 
-function PublishClass:publishRpcAndWait(exchange, routingKey, data, subject, expirationMs)
+function PublishClass:coPublishRpcAndWait(exchange, routingKey, data, subject, expirationMs)
   local id = _getPublishConnection(self.connectionConfig)
   local correlationId = amqpcpp.publish_rpc(id, exchange, routingKey, data, subject or "", tostring(expirationMs or ""))
-  return self:waitForRpcAnswer(id, correlationId, expirationMs)
+  return self:coWaitForRpcAnswer(id, correlationId, expirationMs)
 end
 
-function PublishClass:waitForRpcAnswer(connectionId, correlationId, expirationMs)
+function PublishClass:coDeclareQueue(queueName, timeout)
+  local id = _getPublishConnection(self.connectionConfig)
+  amqpcpp.declare_queue(id, queueName, 0, timeout or 0)
+end
+
+function PublishClass:coWaitForRpcAnswer(connectionId, correlationId, expirationMs)
   local timeout = ngx.now() * 1000 + expirationMs
 
   while true do
@@ -77,7 +90,7 @@ function _getPublishConnection(connectionConfig)
     id = amqpcpp.init(connectionConfig.host, connectionConfig.port, connectionConfig.username, connectionConfig.password, connectionConfig.vhost)
     p_publishConnections[connectionHash] = id
 
-    ngx.timer.at(0.1, function()
+    ngx.timer.at(0, function()
       while true do
         local ok, err = amqpcpp.poll(id)
  
@@ -100,10 +113,11 @@ local _getConsumer
 local ConsumerClass = { }
 
 function _getConsumer(connectionConfig)
-  local t = {
+  local t = { 
     connectionConfig = connectionConfig,
     bindings = { },
-    exchanges = { }
+    exchanges = { },
+    autoConvertMesageToStreamSubjects = { }
   }
 
   if not connectionConfig.host or
@@ -116,23 +130,54 @@ function _getConsumer(connectionConfig)
     return
   end
 
-  setmetatable(t, { __index = ConsumerClass })
+  setmetatable(t, { 
+    __index = ConsumerClass,
+  })
+
   return t
 end
 
-function ConsumerClass:loop(onData)
+function ConsumerClass:syncLoop(onData)
   while true do
-    self:consumeUntilFails(onData)
+    self:coConsumeUntilFails(onData)
+    if ngx.worker.exiting() then
+      break
+    end
+
     ngx.sleep(5)
   end
 end
 
-function ConsumerClass:init(queueName, exchanges, bindings)
+function ConsumerClass:init(queueName)
   self.queueName = queueName
 end
 
-function ConsumerClass:consumeUntilFails(onData)
+function ConsumerClass:enableAutoConvertMessageToStream(subject)
+  table.insert(self.autoConvertMesageToStreamSubjects, subject)
+end
+
+function ConsumerClass:bind(exchange, queueName, routingKey)
+  table.insert(self.bindings, { exchange = exchange, queueName = queueName, routingKey = routingKey })
+end
+
+function ConsumerClass:declareExchange(exchange, mode, flags)
+  table.insert(self.exchanges, { exchange = exchange, mode = mode, flags = flags })
+end
+
+function ConsumerClass:coConsumeUntilFails(onData)
   local id = amqpcpp.init(self.connectionConfig.host, self.connectionConfig.port, self.connectionConfig.username, self.connectionConfig.password, self.connectionConfig.vhost)
+
+  for _, subject in ipairs(self.autoConvertMesageToStreamSubjects) do
+    amqpcpp.enable_auto_convert_message_to_stream(id, subject)
+  end
+
+  for _, exchange in ipairs(self.exchanges) do
+    amqpcpp.declare_exchange(id, exchange.exchange, exchange.mode, exchange.flags)
+  end
+
+  for _, binding in ipairs(self.bindings) do
+    amqpcpp.bind_queue(id, binding.exchange, binding.queueName, binding.routingKey)
+  end
 
   amqpcpp.declare_queue(id, self.queueName, 0)
   amqpcpp.consume(id, self.queueName, 0)
@@ -146,6 +191,7 @@ function ConsumerClass:consumeUntilFails(onData)
     end
 
     local ok, msg, ack, exchange, routingKey, replyTo, correlationId, subject = amqpcpp.get_ready_message(id)
+    local maxProcessingTimeTimeout = ngx.now() * 1000 + (100)
 
     while ok do
       local callOk, errorOrResult = pcall(onData, msg, subject, exchange, routingKey, replyTo, correlationId)
@@ -161,6 +207,15 @@ function ConsumerClass:consumeUntilFails(onData)
       end
 
       ok, msg, ack, exchange, routingKey, replyTo, correlationId, subject = amqpcpp.get_ready_message(id)
+
+      ngx.update_time()
+      if ngx.now() * 1000 > maxProcessingTimeTimeout then -- we might have highly intensive actions that might prevent amqpcpp.poll calling fast enough thus causing timeout
+        break
+      end 
+    end
+
+    if ngx.worker.exiting() then
+      break
     end
 
     ngx.sleep(0.032)
@@ -172,4 +227,6 @@ end
 return {
   getPublisher = _getPublisher,
   getConsumer = _getConsumer,
+  tableToStream = amqpcpp.table_to_stream,
+  streamToTable = amqpcpp.stream_to_table,
 }

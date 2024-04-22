@@ -9,11 +9,303 @@
 #include <chrono>
 #include <thread>
 #include <list>
+#include <unordered_set>
 
 extern "C" {
   #include "lua.h"
   #include "lua.h"
   #include "lauxlib.h"
+}
+
+enum {
+    s_table = 1,
+    s_number = 2,
+    s_string = 3,
+    s_boolean = 4,
+    s_settable = 5,
+    s_lstring = 6
+};
+
+bool tableValueToStream(lua_State* L, std::stringstream& stream, int index, bool ensureLuaTypeMatch)
+{
+    if(ensureLuaTypeMatch) {
+        int type = lua_type(L, index);
+        if(type == LUA_TBOOLEAN) {
+            char k = s_boolean;
+            bool b = lua_toboolean(L, index);
+            stream.write(&k, 1);
+            stream.write((char*)&b, 1);
+            return true;
+
+        } else if(type == LUA_TNUMBER) {
+            char k = s_number;
+            stream.write(&k, 1);
+            double value = lua_tonumber(L, index);
+            stream.write((char*)&value, sizeof(double));
+            return true;
+
+        } else if(type == LUA_TSTRING) {
+            size_t size = 0;
+            const char* str = lua_tolstring(L, index, &size);
+            char k = s_string;
+
+            if(size > 0xffff) {
+                char k = s_lstring;
+                stream.write(&k, 1);
+                stream.write((char*)&size, 4);
+
+            } else {
+                stream.write(&k, 1);
+                stream.write((char*)&size, 2);
+            }
+
+            stream.write(str, size);
+            return true;
+        }
+    }
+    else {
+        if(lua_isboolean(L, index)) {
+            char k = s_boolean;
+            bool b = lua_toboolean(L, index);
+            stream.write(&k, 1);
+            stream.write((char*)&b, 1);
+
+            return true;
+
+        } else if(lua_isnumber(L, index)) {
+            char k = s_number;
+            stream.write(&k, 1);
+            double value = lua_tonumber(L, index);
+            stream.write((char*)&value, sizeof(double));
+
+            return true;
+
+        } else if(lua_isstring(L, index)) {
+            size_t size = 0;
+            const char* str = lua_tolstring(L, index, &size);
+            char k = s_string;
+
+            if(size > 0xffff) {
+                char k = s_lstring;
+                stream.write(&k, 1);
+                stream.write((char*)&size, 4);
+
+            } else {
+                stream.write(&k, 1);
+                stream.write((char*)&size, 2);
+            }
+
+            stream.write(str, size);
+
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool hasValidLuaType(lua_State* L, int index, bool isKey)
+{
+    return lua_isboolean(L, index) ||
+        lua_isnumber(L, index) ||
+        lua_isstring(L, index) ||
+        (!isKey && lua_istable(L, index));
+}
+
+bool tableToStream(lua_State* L, std::stringstream& stream, bool& foundInvalidType, bool ensureLuaTypeMatch)
+{
+    int oldTop = lua_gettop(L);
+
+    lua_pushnil(L);
+
+    while(lua_next(L, -2) != 0) {
+        /* uses 'key' (at index -2) and 'value' (at index -1) */
+        if(hasValidLuaType(L, -2, true) && hasValidLuaType(L, -1, false)) {
+            if(!tableValueToStream(L, stream, -2, ensureLuaTypeMatch)) { //let's fix top later
+                lua_pushstring(L, "!tableValueToStream(L, stream, -2, ensureLuaTypeMatch)");
+                lua_error(L);
+                return false;
+            }
+
+            if(lua_istable(L, -1)) {
+                char t = s_table;
+                stream.write(&t, 1);
+
+                if(!tableToStream(L, stream, foundInvalidType, ensureLuaTypeMatch)) {
+                    lua_pushstring(L, "!tableToStream(L, stream, foundInvalidType, ensureLuaTypeMatch)");
+                    lua_error(L);
+                    return false;
+                }
+
+            } else {
+                if(!tableValueToStream(L, stream, -1, ensureLuaTypeMatch)) {
+                    lua_pushstring(L, "!tableValueToStream(L, stream, -1, ensureLuaTypeMatch)");
+                    lua_error(L);
+                    return false;
+                }
+            }
+
+            char t = s_settable;
+            stream.write(&t, 1);
+        } else {
+            //LOG_ERROR("trying to write an invalid luaType " << g_lua.getTypeName(g_luaState, -2) << " = " << g_lua.getTypeName(g_luaState, -1));
+            foundInvalidType = true;
+            lua_pushstring(L, "Found invalid type");
+            lua_error(L);
+        }
+
+        lua_pop(L, 1);
+    }
+
+    int newTop = lua_gettop(L);
+
+    if(newTop != oldTop)
+        return false;
+
+    return true;
+}
+
+bool getUChar(const char* stream, size_t& size, unsigned char& attr, size_t maxSize)
+{
+    if(size >= maxSize)
+        return false;
+
+    attr = *(unsigned char*)(stream + size);
+    size++;
+    return true;
+}
+
+bool getDouble(const char* stream, size_t& size, double& attr, size_t maxSize)
+{
+    if(size + sizeof(double) >= maxSize)
+        return false;
+
+    attr = *((double*)(stream + size));
+    size += sizeof(double);
+    return true;
+}
+
+bool getLString(const char* stream, size_t& size, std::string& attr, size_t maxSize)
+{
+    if(size + 4 >= maxSize)
+        return false;
+
+    uint32_t stringSize = *((uint32_t*)(stream + size));
+    size += 4;
+
+    if(size + stringSize >= maxSize)
+        return false;
+
+    if(stringSize > 0) {
+        attr = std::string(stream + size, stringSize);
+        size += stringSize;
+    }
+
+    return true;
+}
+
+bool getString(const char* stream, size_t& size, std::string& attr, size_t maxSize)
+{
+    if(size + 2 >= maxSize)
+        return false;
+
+    uint16_t stringSize = *((uint16_t*)(stream + size));
+    size += 2;
+
+    if(size + stringSize >= maxSize)
+        return false;
+
+    if(stringSize > 0) {
+        attr = std::string(stream + size, stringSize);
+        size += stringSize;
+    }
+
+    return true;
+}
+
+bool streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSize)
+{
+    lua_newtable(L);
+
+    int oldTop = lua_gettop(L);
+
+    bool somethingFailed = false;
+    unsigned char attr;
+
+    while(getUChar(stream, size, attr, maxSize)) {
+        if(attr == 255) // this is just to signal that we are using stream
+            continue;
+
+        if(attr == s_table) {
+            lua_newtable(L);
+
+        } else if(attr == s_number) {
+            double value;
+
+            if(!getDouble(stream, size, value, maxSize)) {
+                std::cerr << "streamToTable !stream.GET_VALUE(value) " << std::endl;
+                somethingFailed = true;
+                break;
+            }
+
+            lua_pushnumber(L, value);
+
+        } else if(attr == s_lstring) {
+            std::string value;
+
+            if(!getLString(stream, size, value, maxSize)) {
+                std::cerr << "streamToTable !stream.GET_STRING(value)" << std::endl;
+                somethingFailed = true;
+                break;
+            }
+
+            lua_pushlstring(L, value.c_str(), value.size());
+
+        } else if(attr == s_string) {
+            std::string value;
+
+            if(!getString(stream, size, value, maxSize)) {
+                std::cerr << "streamToTable !stream.GET_STRING(value)" << std::endl;
+                somethingFailed = true;
+                break;
+            }
+
+            lua_pushlstring(L, value.c_str(), value.size());
+
+        } else if(attr == s_boolean) {
+            uint8_t value;
+
+            if(!getUChar(stream, size, value, maxSize)) {
+                std::cerr << "streamToTable !stream.GET_UCHAR(value)" << std::endl;
+                somethingFailed = true;
+                break;
+            }
+
+            lua_pushboolean(L, value);
+
+        } else if(attr == s_settable) {
+            lua_settable(L, -3);
+
+        } else {
+            std::cerr << "streamToTable unknown attr " << attr << ";" << std::endl;
+            somethingFailed = true;
+            break;
+        }
+    }
+
+    int newTop = lua_gettop(L);
+
+    if(newTop - oldTop > 0) {
+        std::cerr << "streamToTable newTop - oldTop " << newTop << " " << oldTop << " >" << std::endl;
+        lua_pop(L, newTop - oldTop);
+        return false;
+
+    } else if(newTop != oldTop) {
+        std::cerr << "streamToTable newTop != oldTop " << newTop << " " << oldTop << std::endl;
+        return false;
+    }
+
+    return !somethingFailed;
 }
 
 std::string generateUniqueString()
@@ -189,15 +481,20 @@ public:
 
     std::list<AmqpMessagePtr>& getMessages() { return m_messages; }
     std::unordered_map<std::string, std::string>& getRPCMessages() { return m_rpcMessages; }
+    std::unordered_set<std::string>& getAutoConvertMessageToStream() { return m_autoConvertMessageToStream; }
 
     void declareExchange(const std::string& exchangeName, int mode, int flags) {
         m_channel->declareExchange(exchangeName, AMQP::ExchangeType(mode), flags);
     }
 
-    void declareQueue(const std::string& queueName, int flags) {
+    void declareQueue(const std::string& queueName, int flags, int timeout) {
         AMQP::Table declareQueueArguments;
         //declareQueueArquments["x-queue-type"] = "quorum";
         declareQueueArguments["x-queue-version"] = 2;
+
+        if(timeout > 0)
+            declareQueueArguments["x-expires"] = timeout;
+
         m_channel->declareQueue(queueName, flags, declareQueueArguments);
     }
 
@@ -219,6 +516,8 @@ public:
         publishEnvelope.setHeaders(headers);
         m_channel->publish(exchange, routingKey, publishEnvelope); // we don't need ack yet.
     }
+
+    void enableAutoConvertMessageToStream(std::string& subject) { m_autoConvertMessageToStream.insert(subject); }
 
 private:
     void enableReplyTo() {
@@ -270,6 +569,8 @@ private:
     bool m_replyToActive = false;
     bool m_enablingReplyTo = false;
     bool m_failed = false;
+
+    std::unordered_set<std::string> m_autoConvertMessageToStream;
 
     std::string m_channelErrorMessage;
     std::string m_address;
@@ -386,7 +687,15 @@ int amqp_get_ready_message(lua_State *L)
     messages.pop_front();
 
     lua_pushboolean(L, true);
-    lua_pushlstring(L, first->message.c_str(), first->message.size());
+
+    auto& autoConvertMessageToStream = amqp->getAutoConvertMessageToStream();
+    
+    if(autoConvertMessageToStream.count(first->subject)) {
+        size_t sizePos = 0;
+        streamToTable(first->message.c_str(), L, sizePos, first->message.size());
+    } else
+        lua_pushlstring(L, first->message.c_str(), first->message.size());
+
     lua_pushnumber(L, first->ack);
     lua_pushstring(L, first->exchange.c_str());
     lua_pushstring(L, first->routingKey.c_str());
@@ -416,6 +725,12 @@ int amqp_declare_exchange(lua_State *L)
 
 int amqp_declare_queue(lua_State *L)
 {
+    int nArgs = lua_gettop(L);
+    int timeout = 0;
+
+    if(nArgs > 3)
+        timeout = lua_pop_number(L);
+
     int flags = lua_pop_number(L);
     std::string queueName = lua_pop_string(L);
     int id = lua_pop_number(L);
@@ -426,7 +741,7 @@ int amqp_declare_queue(lua_State *L)
         return 0;
     }
 
-    amqp->declareQueue(queueName, flags);
+    amqp->declareQueue(queueName, flags, timeout);
     return 0;
 }
 
@@ -445,6 +760,60 @@ int amqp_bind_queue(lua_State *L)
 
     amqp->bindQueue(exchangeName, queueName, key);
     return 0;
+}
+
+int enable_auto_convert_message_to_stream(lua_State *L)
+{
+    std::string subject = lua_pop_string(L);
+    int id = lua_pop_number(L);
+
+    Amqp* amqp = Amqps[id];
+    if(!amqp) {
+        std::cerr << "amqp_bind_queue !amqp (" << id << ")" << std::endl;
+        return 0;
+    }
+
+    amqp->enableAutoConvertMessageToStream(subject);
+    return 0;
+}
+
+int table_to_stream(lua_State *L)
+{
+    if(!lua_istable(L, -1)) {
+        lua_pushstring(L, "table_to_stream !lua_istable(L, -1)");
+        lua_error(L);
+        return 0;
+    }
+
+    std::stringstream stream;
+    bool foundInvalidType = false;
+
+    char c = 255;
+    stream.write(&c, 1);
+
+    if(!tableToStream(L, stream, foundInvalidType, false)) {
+        lua_pushstring(L, "!tableToStream(L, stream, foundInvalidType, false)");
+        lua_error(L);
+    }
+    lua_pop(L, 1);
+    std::string str = stream.str();
+    std::cout << "table_to_stream" << str.size() << std::endl;
+    lua_pushlstring(L, str.c_str(), str.size());
+    return 1;
+}
+
+int stream_to_table(lua_State *L)
+{
+    if(!lua_isstring(L, -1)) {
+        lua_pushstring(L, "!stream_to_table !lua_isstring");
+        lua_error(L);
+        return 0;
+    }
+
+    std::string str = lua_pop_string(L);
+    size_t curSize = 0;
+    streamToTable(str.c_str(), L, curSize, str.size());
+    return 1;
 }
 
 int amqp_terminate(lua_State *L)
@@ -614,6 +983,15 @@ int luaopen_amqpcpp(lua_State *L)
 
     lua_pushcfunction (L, amqp_bind_queue);
     lua_setfield(L, -2, "bind_queue");
+
+    lua_pushcfunction (L, enable_auto_convert_message_to_stream);
+    lua_setfield(L, -2, "enable_auto_convert_message_to_stream");
+
+    lua_pushcfunction (L, table_to_stream);
+    lua_setfield(L, -2, "table_to_stream");
+
+    lua_pushcfunction (L, stream_to_table);
+    lua_setfield(L, -2, "stream_to_table");
 
     return 1;
 }
