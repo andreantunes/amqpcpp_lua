@@ -62,7 +62,7 @@ function PublishClass:coWaitForRpcAnswer(connectionId, correlationId, expiration
     local amqpFailed, success, message = amqpcpp.get_rpc_message(connectionId, correlationId)
   
     if amqpFailed then
-      print("Connection failed, could not retrieve.")
+      ngx.log(ngx.ERR, "Connection failed, could not retrieve.")
       return false  
     end  
   
@@ -186,7 +186,7 @@ function ConsumerClass:coConsumeUntilFails(onData)
     local ok, err = amqpcpp.poll(id)
 
     if not ok then
-      print(err)
+      ngx.log(ngx.ERR, err)
       break
     end
 
@@ -195,15 +195,15 @@ function ConsumerClass:coConsumeUntilFails(onData)
 
     while ok do
       local callOk, errorOrResult = pcall(onData, msg, subject, exchange, routingKey, replyTo, correlationId)
-      if not callOk then
-        ngx.log(ngx.ERR, errorOrResult)
-        amqpcpp.reject(id, ack)
-
-      elseif errorOrResult == true then
-        amqpcpp.ack(id, ack)
-
+      if callOk then
+        if errorOrResult == false then
+          amqpcpp.reject(id, ack)
+        else
+          amqpcpp.ack(id, ack)
+        end
       else
-        amqpcpp.reject(id, ack)
+        amqpcpp.ack(id, ack)
+        ngx.log(ngx.ERR, errorOrResult)
       end
 
       ok, msg, ack, exchange, routingKey, replyTo, correlationId, subject = amqpcpp.get_ready_message(id)

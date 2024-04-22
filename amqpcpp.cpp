@@ -26,79 +26,43 @@ enum {
     s_lstring = 6
 };
 
-bool tableValueToStream(lua_State* L, std::stringstream& stream, int index, bool ensureLuaTypeMatch)
+bool tableValueToStream(lua_State* L, std::stringstream& stream, int index)
 {
-    if(ensureLuaTypeMatch) {
-        int type = lua_type(L, index);
-        if(type == LUA_TBOOLEAN) {
-            char k = s_boolean;
-            bool b = lua_toboolean(L, index);
-            stream.write(&k, 1);
-            stream.write((char*)&b, 1);
-            return true;
+    int type = lua_type(L, index);
+    if(type == LUA_TBOOLEAN) {
+        char k = s_boolean;
+        bool b = lua_toboolean(L, index);
+        stream.write(&k, 1);
+        stream.write((char*)&b, 1);
+        return true;
 
-        } else if(type == LUA_TNUMBER) {
-            char k = s_number;
-            stream.write(&k, 1);
-            double value = lua_tonumber(L, index);
-            stream.write((char*)&value, sizeof(double));
-            return true;
+    } else if(type == LUA_TNUMBER) {
+        char k = s_number;
+        stream.write(&k, 1);
+        double value = lua_tonumber(L, index);
+        stream.write((char*)&value, sizeof(double));
+        return true;
 
-        } else if(type == LUA_TSTRING) {
-            size_t size = 0;
-            const char* str = lua_tolstring(L, index, &size);
+    } else if(type == LUA_TSTRING) {
+        size_t size = 0;
+        const char* str = lua_tolstring(L, index, &size);
+
+        if(size > 0xffff) {
+            char k = s_lstring;
+            stream.write(&k, 1);
+            stream.write((char*)&size, 4);
+
+        } else {
             char k = s_string;
-
-            if(size > 0xffff) {
-                char k = s_lstring;
-                stream.write(&k, 1);
-                stream.write((char*)&size, 4);
-
-            } else {
-                stream.write(&k, 1);
-                stream.write((char*)&size, 2);
-            }
-
-            stream.write(str, size);
-            return true;
-        }
-    }
-    else {
-        if(lua_isboolean(L, index)) {
-            char k = s_boolean;
-            bool b = lua_toboolean(L, index);
             stream.write(&k, 1);
-            stream.write((char*)&b, 1);
-
-            return true;
-
-        } else if(lua_isnumber(L, index)) {
-            char k = s_number;
-            stream.write(&k, 1);
-            double value = lua_tonumber(L, index);
-            stream.write((char*)&value, sizeof(double));
-
-            return true;
-
-        } else if(lua_isstring(L, index)) {
-            size_t size = 0;
-            const char* str = lua_tolstring(L, index, &size);
-            char k = s_string;
-
-            if(size > 0xffff) {
-                char k = s_lstring;
-                stream.write(&k, 1);
-                stream.write((char*)&size, 4);
-
-            } else {
-                stream.write(&k, 1);
-                stream.write((char*)&size, 2);
-            }
-
-            stream.write(str, size);
-
-            return true;
+            stream.write((char*)&size, 2);
         }
+
+        stream.write(str, size);
+        return true;
+    } else {
+        lua_pushstring(L, "!tableValueToStream(L, stream, -1)");
+        lua_error(L);
     }
 
     return false;
@@ -112,7 +76,13 @@ bool hasValidLuaType(lua_State* L, int index, bool isKey)
         (!isKey && lua_istable(L, index));
 }
 
-bool tableToStream(lua_State* L, std::stringstream& stream, bool& foundInvalidType, bool ensureLuaTypeMatch)
+std::string getLuaTypeName(lua_State *L, int index)
+{
+    const char *ret = lua_typename(L, lua_type(L, index));
+    return std::string(ret ? ret : "?");
+}
+
+void tableToStream(lua_State* L, std::stringstream& stream)
 {
     int oldTop = lua_gettop(L);
 
@@ -121,36 +91,23 @@ bool tableToStream(lua_State* L, std::stringstream& stream, bool& foundInvalidTy
     while(lua_next(L, -2) != 0) {
         /* uses 'key' (at index -2) and 'value' (at index -1) */
         if(hasValidLuaType(L, -2, true) && hasValidLuaType(L, -1, false)) {
-            if(!tableValueToStream(L, stream, -2, ensureLuaTypeMatch)) { //let's fix top later
-                lua_pushstring(L, "!tableValueToStream(L, stream, -2, ensureLuaTypeMatch)");
-                lua_error(L);
-                return false;
-            }
+            tableValueToStream(L, stream, -2);
 
             if(lua_istable(L, -1)) {
                 char t = s_table;
                 stream.write(&t, 1);
+                tableToStream(L, stream);
 
-                if(!tableToStream(L, stream, foundInvalidType, ensureLuaTypeMatch)) {
-                    lua_pushstring(L, "!tableToStream(L, stream, foundInvalidType, ensureLuaTypeMatch)");
-                    lua_error(L);
-                    return false;
-                }
-
-            } else {
-                if(!tableValueToStream(L, stream, -1, ensureLuaTypeMatch)) {
-                    lua_pushstring(L, "!tableValueToStream(L, stream, -1, ensureLuaTypeMatch)");
-                    lua_error(L);
-                    return false;
-                }
-            }
+            } else
+                tableValueToStream(L, stream, -1);
 
             char t = s_settable;
             stream.write(&t, 1);
+
         } else {
-            //LOG_ERROR("trying to write an invalid luaType " << g_lua.getTypeName(g_luaState, -2) << " = " << g_lua.getTypeName(g_luaState, -1));
-            foundInvalidType = true;
-            lua_pushstring(L, "Found invalid type");
+            std::stringstream err;
+            err << "tableToStream trying to write an invalid luaType " << getLuaTypeName(L, -2) << " = " << getLuaTypeName(L, -1);
+            lua_pushstring(L, err.str().c_str());
             lua_error(L);
         }
 
@@ -159,10 +116,10 @@ bool tableToStream(lua_State* L, std::stringstream& stream, bool& foundInvalidTy
 
     int newTop = lua_gettop(L);
 
-    if(newTop != oldTop)
-        return false;
-
-    return true;
+    if(newTop != oldTop) {
+        lua_pushstring(L, "tableToStream newTop != oldTop" );
+        lua_error(L);
+    }
 }
 
 bool getUChar(const char* stream, size_t& size, unsigned char& attr, size_t maxSize)
@@ -223,13 +180,11 @@ bool getString(const char* stream, size_t& size, std::string& attr, size_t maxSi
     return true;
 }
 
-bool streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSize)
+void streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSize)
 {
     lua_newtable(L);
 
     int oldTop = lua_gettop(L);
-
-    bool somethingFailed = false;
     unsigned char attr;
 
     while(getUChar(stream, size, attr, maxSize)) {
@@ -243,8 +198,8 @@ bool streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSiz
             double value;
 
             if(!getDouble(stream, size, value, maxSize)) {
-                std::cerr << "streamToTable !stream.GET_VALUE(value) " << std::endl;
-                somethingFailed = true;
+                lua_pushstring(L, "streamToTable !stream.getDouble(value) ");
+                lua_error(L);
                 break;
             }
 
@@ -254,8 +209,8 @@ bool streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSiz
             std::string value;
 
             if(!getLString(stream, size, value, maxSize)) {
-                std::cerr << "streamToTable !stream.GET_STRING(value)" << std::endl;
-                somethingFailed = true;
+                lua_pushstring(L, "streamToTable !stream.getLString(value) ");
+                lua_error(L);
                 break;
             }
 
@@ -265,8 +220,8 @@ bool streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSiz
             std::string value;
 
             if(!getString(stream, size, value, maxSize)) {
-                std::cerr << "streamToTable !stream.GET_STRING(value)" << std::endl;
-                somethingFailed = true;
+                lua_pushstring(L, "streamToTable !stream.getString(value) ");
+                lua_error(L);
                 break;
             }
 
@@ -276,8 +231,8 @@ bool streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSiz
             uint8_t value;
 
             if(!getUChar(stream, size, value, maxSize)) {
-                std::cerr << "streamToTable !stream.GET_UCHAR(value)" << std::endl;
-                somethingFailed = true;
+                lua_pushstring(L, "streamToTable !stream.getUChar(value) ");
+                lua_error(L);
                 break;
             }
 
@@ -287,8 +242,10 @@ bool streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSiz
             lua_settable(L, -3);
 
         } else {
-            std::cerr << "streamToTable unknown attr " << attr << ";" << std::endl;
-            somethingFailed = true;
+            std::stringstream ss;
+            ss << "streamToTable unknown attr " << attr << ";";
+            lua_pushstring(L, ss.str().c_str());
+            lua_error(L);
             break;
         }
     }
@@ -296,16 +253,13 @@ bool streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSiz
     int newTop = lua_gettop(L);
 
     if(newTop - oldTop > 0) {
-        std::cerr << "streamToTable newTop - oldTop " << newTop << " " << oldTop << " >" << std::endl;
-        lua_pop(L, newTop - oldTop);
-        return false;
+        lua_pushstring(L, "streamToTable newTop - oldTop > 0");
+        lua_error(L);
 
     } else if(newTop != oldTop) {
-        std::cerr << "streamToTable newTop != oldTop " << newTop << " " << oldTop << std::endl;
-        return false;
+        lua_pushstring(L, "streamToTable newTop != oldTop");
+        lua_error(L);
     }
-
-    return !somethingFailed;
 }
 
 std::string generateUniqueString()
@@ -786,18 +740,13 @@ int table_to_stream(lua_State *L)
     }
 
     std::stringstream stream;
-    bool foundInvalidType = false;
-
     char c = 255;
     stream.write(&c, 1);
 
-    if(!tableToStream(L, stream, foundInvalidType, false)) {
-        lua_pushstring(L, "!tableToStream(L, stream, foundInvalidType, false)");
-        lua_error(L);
-    }
+    tableToStream(L, stream);
+
     lua_pop(L, 1);
     std::string str = stream.str();
-    std::cout << "table_to_stream" << str.size() << std::endl;
     lua_pushlstring(L, str.c_str(), str.size());
     return 1;
 }
