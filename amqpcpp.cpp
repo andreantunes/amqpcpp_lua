@@ -26,7 +26,7 @@ enum {
     s_lstring = 6
 };
 
-bool tableValueToStream(lua_State* L, std::stringstream& stream, int index)
+void tableValueToStream(lua_State* L, std::ostream& stream, int index)
 {
     int type = lua_type(L, index);
     if(type == LUA_TBOOLEAN) {
@@ -34,14 +34,12 @@ bool tableValueToStream(lua_State* L, std::stringstream& stream, int index)
         bool b = lua_toboolean(L, index);
         stream.write(&k, 1);
         stream.write((char*)&b, 1);
-        return true;
 
     } else if(type == LUA_TNUMBER) {
         char k = s_number;
         stream.write(&k, 1);
         double value = lua_tonumber(L, index);
         stream.write((char*)&value, sizeof(double));
-        return true;
 
     } else if(type == LUA_TSTRING) {
         size_t size = 0;
@@ -59,21 +57,20 @@ bool tableValueToStream(lua_State* L, std::stringstream& stream, int index)
         }
 
         stream.write(str, size);
-        return true;
     } else {
         lua_pushstring(L, "!tableValueToStream(L, stream, -1)");
         lua_error(L);
     }
-
-    return false;
 }
 
 bool hasValidLuaType(lua_State* L, int index, bool isKey)
 {
-    return lua_isboolean(L, index) ||
-        lua_isnumber(L, index) ||
-        lua_isstring(L, index) ||
-        (!isKey && lua_istable(L, index));
+    int type = lua_type(L, index);
+
+    return type == LUA_TBOOLEAN ||
+        type == LUA_TNUMBER ||
+        type == LUA_TSTRING ||
+        (!isKey && type == LUA_TTABLE);
 }
 
 std::string getLuaTypeName(lua_State *L, int index)
@@ -82,7 +79,7 @@ std::string getLuaTypeName(lua_State *L, int index)
     return std::string(ret ? ret : "?");
 }
 
-void tableToStream(lua_State* L, std::stringstream& stream)
+void tableToStream(lua_State* L, std::ostream& stream)
 {
     int oldTop = lua_gettop(L);
 
@@ -731,6 +728,10 @@ int enable_auto_convert_message_to_stream(lua_State *L)
     return 0;
 }
 
+int64_t getMsTicks() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 int table_to_stream(lua_State *L)
 {
     if(!lua_istable(L, -1)) {
@@ -739,15 +740,24 @@ int table_to_stream(lua_State *L)
         return 0;
     }
 
-    std::stringstream stream;
+    struct StringStreamBuf : public std::streambuf {
+        std::streamsize xsputn(const char_type* s, std::streamsize n) {
+            buffer.append(s, n);
+            return n;
+        }
+
+        std::string buffer;
+    };
+
+    static StringStreamBuf stringStreamBuf;
+    std::ostream stream(&stringStreamBuf);
     char c = 255;
     stream.write(&c, 1);
-
     tableToStream(L, stream);
 
     lua_pop(L, 1);
-    std::string str = stream.str();
-    lua_pushlstring(L, str.c_str(), str.size());
+    lua_pushlstring(L, stringStreamBuf.buffer.c_str(), stringStreamBuf.buffer.size());
+    stringStreamBuf.buffer.clear();
     return 1;
 }
 
