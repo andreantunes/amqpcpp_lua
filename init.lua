@@ -29,24 +29,24 @@ local function _coPublish(premature, ...)
   PublishClass.coPublish(...)
 end
 
-function PublishClass:asyncPublish(exchange, routingKey, data, subject, correlationId, expirationMs)
-  ngx.timer.at(0, _coPublish, self, exchange, routingKey, data, subject, correlationId, expirationMs)
+function PublishClass:asyncPublish(exchange, routingKey, subject, data, correlationId, expirationMs)
+  ngx.timer.at(0, _coPublish, self, exchange, routingKey, subject, data, correlationId, expirationMs)
 end 
 
-function PublishClass:coPublish(exchange, routingKey, data, subject, correlationId, expirationMs)
+function PublishClass:coPublish(exchange, routingKey, subject, data, correlationId, expirationMs)
   local id = _getPublishConnection(self.connectionConfig)
-  amqpcpp.publish(id, exchange, routingKey, data, subject or "", correlationId or "", tostring(expirationMs or "") or "")
+  amqpcpp.publish(id, exchange, routingKey, subject, data, correlationId or "", tostring(expirationMs or "") or "")
 end 
 
-function PublishClass:cpPublishRpc(exchange, routingKey, data, subject, expirationMs)
+function PublishClass:cpPublishRpc(exchange, routingKey, subject, data, expirationMs)
   local id = _getPublishConnection(self.connectionConfig)
-  local correlationId = amqpcpp.publish_rpc(id, exchange, routingKey, data, subject or "", tostring(expirationMs or ""))
+  local correlationId = amqpcpp.publish_rpc(id, exchange, routingKey, subject, data, tostring(expirationMs or ""))
   return id, correlationId
 end
 
-function PublishClass:coPublishRpcAndWait(exchange, routingKey, data, subject, expirationMs)
+function PublishClass:coPublishRpcAndWait(exchange, routingKey, subject, data, expirationMs)
   local id = _getPublishConnection(self.connectionConfig)
-  local correlationId = amqpcpp.publish_rpc(id, exchange, routingKey, data, subject or "", tostring(expirationMs or ""))
+  local correlationId = amqpcpp.publish_rpc(id, exchange, routingKey, subject, data, tostring(expirationMs or ""))
   return self:coWaitForRpcAnswer(id, correlationId, expirationMs)
 end
 
@@ -86,7 +86,10 @@ function _getPublishConnection(connectionConfig)
     id = nil
   end
 
+  local connecting = false
+
   if not id then
+    connecting = true
     id = amqpcpp.init(connectionConfig.host, connectionConfig.port, connectionConfig.username, connectionConfig.password, connectionConfig.vhost)
     p_publishConnections[connectionHash] = id
 
@@ -104,6 +107,24 @@ function _getPublishConnection(connectionConfig)
         ngx.sleep(0.032)
       end
     end)
+  end
+
+  if connecting then
+    while true do
+      if not amqpcpp.is_ok(id) then
+        break
+      end
+
+      if amqpcpp.ready(id) then
+        if connecting then
+          print("Connected to rabbit!");
+        end
+
+        break
+      end
+
+      ngx.sleep(0.032)
+    end
   end
 
   return id
@@ -175,11 +196,12 @@ function ConsumerClass:coConsumeUntilFails(onData)
     amqpcpp.declare_exchange(id, exchange.exchange, exchange.mode, exchange.flags)
   end
 
+  amqpcpp.declare_queue(id, self.queueName, 0)
+
   for _, binding in ipairs(self.bindings) do
     amqpcpp.bind_queue(id, binding.exchange, binding.queueName, binding.routingKey)
   end
 
-  amqpcpp.declare_queue(id, self.queueName, 0)
   amqpcpp.consume(id, self.queueName, 0)
 
   while true do

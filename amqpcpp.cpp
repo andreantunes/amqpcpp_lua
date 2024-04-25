@@ -275,8 +275,14 @@ private:
         errorMessage = std::string(message);
     }
 
+    virtual void onReady(AMQP::TcpConnection *connection) override
+    {
+        ready = true;
+    }
+
 public:
     bool error = false;
+    bool ready = false;
     std::string errorMessage;
 
     AmqpHandler(boost::asio::io_context &io_context) : AMQP::LibBoostAsioHandler(io_context) {}
@@ -356,6 +362,10 @@ public:
         }
 
         return true;
+    }
+
+    bool ready() {
+        return m_handler->ready;
     }
 
     void consume(const std::string& queueName, int flags) {
@@ -571,6 +581,21 @@ int amqp_init(lua_State *L)
     return 1;
 }
 
+int amqp_ready(lua_State *L)
+{
+    int id = lua_pop_number(L);
+
+    Amqp* amqp = Amqps[id];
+    if(!amqp) {
+        std::cerr << "amqp_consume !amqp (" << id << ")" << std::endl;
+        lua_pushboolean(L, false);
+        return 1;
+    }
+
+    lua_pushboolean(L, amqp->ready());
+    return 1;
+}
+
 int amqp_consume(lua_State *L)
 {
     int flags = lua_pop_number(L);
@@ -698,8 +723,8 @@ int amqp_declare_queue(lua_State *L)
 
 int amqp_bind_queue(lua_State *L)
 {
-    std::string key = lua_pop_string(L);
     std::string queueName = lua_pop_string(L);
+    std::string key = lua_pop_string(L);
     std::string exchangeName = lua_pop_string(L);
     int id = lua_pop_number(L);
 
@@ -817,8 +842,8 @@ int amqp_publish(lua_State *L)
     //todo: need to be more reliable
     std::string expiration = lua_pop_string(L);
     std::string correlationId = lua_pop_string(L);
-    std::string subject = lua_pop_string(L);
     std::string message = lua_pop_string(L);
+    std::string subject = lua_pop_string(L);
     std::string routeId = lua_pop_string(L);
     std::string exchange = lua_pop_string(L);
     int id = lua_pop_number(L);
@@ -829,6 +854,13 @@ int amqp_publish(lua_State *L)
         return 0;
     }
 
+    if(subject.size() > 1024) {
+        std::stringstream ss;
+        ss << "subject.size() > 1024 " << subject.size();
+        lua_pushstring(L, ss.str().c_str());
+        lua_error(L);
+    }
+
     amqp->publish(exchange, routeId, message, subject, correlationId, expiration);
     return 0;
 }
@@ -836,8 +868,8 @@ int amqp_publish(lua_State *L)
 int amqp_publish_rpc(lua_State *L)
 {
     std::string expiration = lua_pop_string(L);
-    std::string subject = lua_pop_string(L);
     std::string message = lua_pop_string(L);
+    std::string subject = lua_pop_string(L);
     std::string routeId = lua_pop_string(L);
     std::string exchange = lua_pop_string(L);
     int id = lua_pop_number(L);
@@ -903,6 +935,9 @@ int luaopen_amqpcpp(lua_State *L)
     lua_newtable(L);
     lua_pushcfunction(L, amqp_init);
     lua_setfield(L, -2, "init");
+
+    lua_pushcfunction(L, amqp_ready);
+    lua_setfield(L, -2, "ready");
 
     lua_pushcfunction(L, amqp_terminate);
     lua_setfield(L, -2, "terminate");
