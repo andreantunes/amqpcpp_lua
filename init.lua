@@ -75,22 +75,23 @@ function PublishClass:coWaitForRpcAnswer(connectionId, correlationId, expiration
     end
   
     ngx.sleep(0.032)
+
+    if ngx.worker.exiting() then
+      return false
+    end
   end
 end
 
 function _getPublishConnection(connectionConfig)
   local connectionHash = table.concat({ connectionConfig.host, connectionConfig.port, connectionConfig.username, connectionConfig.password, connectionConfig.vhost })
   local id = p_publishConnections[connectionHash]
-
-  if id and not amqpcpp.is_ok(id) then
-    id = nil
-  end
-
   local connecting = false
 
   if not id then
     connecting = true
-    id = amqpcpp.init(connectionConfig.host, connectionConfig.port, connectionConfig.username, connectionConfig.password, connectionConfig.vhost)
+    id = amqpcpp.create(connectionConfig.host, connectionConfig.port, connectionConfig.username, connectionConfig.password, connectionConfig.vhost)
+    amqpcpp.start(id)
+
     p_publishConnections[connectionHash] = id
 
     ngx.timer.at(0, function()
@@ -99,32 +100,29 @@ function _getPublishConnection(connectionConfig)
  
         if not ok then
           amqpcpp.terminate(id)
-          p_publishConnections[connectionHash] = nil
           ngx.log(ngx.ERR, err)
-          break
+          amqpcpp.start(id)
         end
 
         ngx.sleep(0.032)
+
+        if ngx.worker.exiting() then
+          break
+        end
       end
     end)
   end
 
-  if connecting then
-    while true do
-      if not amqpcpp.is_ok(id) then
-        break
-      end
+  while not amqpcpp.is_ready(id) do
+    ngx.sleep(0.032)
 
-      if amqpcpp.ready(id) then
-        if connecting then
-          print("Connected to rabbit!");
-        end
-
-        break
-      end
-
-      ngx.sleep(0.032)
+    if ngx.worker.exiting() then
+      break
     end
+  end
+
+  if connecting then
+    print("Connected to rabbit!");
   end
 
   return id
@@ -138,7 +136,8 @@ function _getConsumer(connectionConfig)
     connectionConfig = connectionConfig,
     bindings = { },
     exchanges = { },
-    autoConvertMesageToStreamSubjects = { }
+    autoConvertMesageToStreamSubjects = { },
+    dedupAlgorithm = false
   }
 
   if not connectionConfig.host or
@@ -159,8 +158,13 @@ function _getConsumer(connectionConfig)
 end
 
 function ConsumerClass:syncLoop(onData)
+  local id = amqpcpp.create(self.connectionConfig.host, self.connectionConfig.port, self.connectionConfig.username, self.connectionConfig.password, self.connectionConfig.vhost)
+
   while true do
-    self:coConsumeUntilFails(onData)
+    amqpcpp.start(id)
+    self:coConsumeUntilFails(id, onData)
+    amqpcpp.terminate(id)
+
     if ngx.worker.exiting() then
       break
     end
@@ -177,6 +181,10 @@ function ConsumerClass:enableAutoConvertMessageToStream(subject)
   table.insert(self.autoConvertMesageToStreamSubjects, subject)
 end
 
+function ConsumerClass:enableDedupAlgorithm()
+  self.dedupAlgorithm = true
+end 
+
 function ConsumerClass:bind(exchange, queueName, routingKey)
   table.insert(self.bindings, { exchange = exchange, queueName = queueName, routingKey = routingKey })
 end
@@ -185,8 +193,10 @@ function ConsumerClass:declareExchange(exchange, mode, flags)
   table.insert(self.exchanges, { exchange = exchange, mode = mode, flags = flags })
 end
 
-function ConsumerClass:coConsumeUntilFails(onData)
-  local id = amqpcpp.init(self.connectionConfig.host, self.connectionConfig.port, self.connectionConfig.username, self.connectionConfig.password, self.connectionConfig.vhost)
+function ConsumerClass:coConsumeUntilFails(id, onData)
+  if self.dedupAlgorithm then
+    amqpcpp.enable_dedup_algorithm(id) 
+  end
 
   for _, subject in ipairs(self.autoConvertMesageToStreamSubjects) do
     amqpcpp.enable_auto_convert_message_to_stream(id, subject)
@@ -242,8 +252,6 @@ function ConsumerClass:coConsumeUntilFails(onData)
 
     ngx.sleep(0.032)
   end
-
-  amqpcpp.terminate(id)
 end
 
 return {

@@ -26,6 +26,24 @@ enum {
     s_lstring = 6
 };
 
+void lua_push_error(lua_State* L, const std::string& error)
+{
+    lua_pushstring(L, error.c_str());
+    lua_error(L);
+}
+
+int64_t getMsTicks() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+std::string generateUniqueString()
+{
+    boost::uuids::uuid uuid = boost::uuids::random_generator()();
+    std::stringstream ss;
+    ss << uuid;
+    return ss.str();
+}
+
 void tableValueToStream(lua_State* L, std::ostream& stream, int index)
 {
     int type = lua_type(L, index);
@@ -58,8 +76,7 @@ void tableValueToStream(lua_State* L, std::ostream& stream, int index)
 
         stream.write(str, size);
     } else {
-        lua_pushstring(L, "!tableValueToStream(L, stream, -1)");
-        lua_error(L);
+        lua_push_error(L, "!tableValueToStream(L, stream, -1)");
     }
 }
 
@@ -104,8 +121,7 @@ void tableToStream(lua_State* L, std::ostream& stream)
         } else {
             std::stringstream err;
             err << "tableToStream trying to write an invalid luaType " << getLuaTypeName(L, -2) << " = " << getLuaTypeName(L, -1);
-            lua_pushstring(L, err.str().c_str());
-            lua_error(L);
+            lua_push_error(L, err.str());
         }
 
         lua_pop(L, 1);
@@ -114,8 +130,7 @@ void tableToStream(lua_State* L, std::ostream& stream)
     int newTop = lua_gettop(L);
 
     if(newTop != oldTop) {
-        lua_pushstring(L, "tableToStream newTop != oldTop" );
-        lua_error(L);
+        lua_push_error(L, "tableToStream newTop != oldTop" );
     }
 }
 
@@ -195,8 +210,7 @@ void streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSiz
             double value;
 
             if(!getDouble(stream, size, value, maxSize)) {
-                lua_pushstring(L, "streamToTable !stream.getDouble(value) ");
-                lua_error(L);
+                lua_push_error(L, "streamToTable !stream.getDouble(value) ");
                 break;
             }
 
@@ -206,8 +220,7 @@ void streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSiz
             std::string value;
 
             if(!getLString(stream, size, value, maxSize)) {
-                lua_pushstring(L, "streamToTable !stream.getLString(value) ");
-                lua_error(L);
+                lua_push_error(L, "streamToTable !stream.getLString(value) ");
                 break;
             }
 
@@ -217,8 +230,7 @@ void streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSiz
             std::string value;
 
             if(!getString(stream, size, value, maxSize)) {
-                lua_pushstring(L, "streamToTable !stream.getString(value) ");
-                lua_error(L);
+                lua_push_error(L, "streamToTable !stream.getString(value) ");
                 break;
             }
 
@@ -228,8 +240,7 @@ void streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSiz
             uint8_t value;
 
             if(!getUChar(stream, size, value, maxSize)) {
-                lua_pushstring(L, "streamToTable !stream.getUChar(value) ");
-                lua_error(L);
+                lua_push_error(L, "streamToTable !stream.getUChar(value) ");
                 break;
             }
 
@@ -241,8 +252,7 @@ void streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSiz
         } else {
             std::stringstream ss;
             ss << "streamToTable unknown attr " << attr << ";";
-            lua_pushstring(L, ss.str().c_str());
-            lua_error(L);
+            lua_push_error(L, ss.str());
             break;
         }
     }
@@ -250,21 +260,11 @@ void streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSiz
     int newTop = lua_gettop(L);
 
     if(newTop - oldTop > 0) {
-        lua_pushstring(L, "streamToTable newTop - oldTop > 0");
-        lua_error(L);
+        lua_push_error(L, "streamToTable newTop - oldTop > 0");
 
     } else if(newTop != oldTop) {
-        lua_pushstring(L, "streamToTable newTop != oldTop");
-        lua_error(L);
+        lua_push_error(L, "streamToTable newTop != oldTop");
     }
-}
-
-std::string generateUniqueString()
-{
-    boost::uuids::uuid uuid = boost::uuids::random_generator()();
-    std::stringstream ss;
-    ss << uuid;
-    return ss.str();
 }
 
 class AmqpHandler : public AMQP::LibBoostAsioHandler
@@ -292,6 +292,7 @@ public:
 
 struct AmqpMessage
 {
+    std::string dupUuid;
     std::string message;
     std::string exchange;
     std::string routingKey;
@@ -300,6 +301,7 @@ struct AmqpMessage
     std::string subject;
     std::string expiration;
     uint64_t ack;
+    uint64_t dupOrderId = 0;
 };
 
 typedef std::shared_ptr<AmqpMessage> AmqpMessagePtr;
@@ -308,8 +310,13 @@ class Amqp
 public:
     Amqp(const std::string& address) {
         m_address = address;
-        m_handler = new AmqpHandler(m_io_context);
-        m_connection = new AMQP::TcpConnection(m_handler, AMQP::Address(address));
+        m_uuid = generateUniqueString();
+    }
+
+    void start() {
+        m_io_context = new boost::asio::io_context;
+        m_handler = new AmqpHandler(*m_io_context);
+        m_connection = new AMQP::TcpConnection(m_handler, AMQP::Address(m_address));
         m_channel = new AMQP::TcpChannel(m_connection);
 
         m_channel->onError([this](const char* message) {
@@ -318,7 +325,7 @@ public:
         });
     }
 
-    ~Amqp() {
+    void terminate() {
         //this order matters
         delete m_channel;
         m_channel = NULL;
@@ -328,14 +335,28 @@ public:
 
         delete m_handler;
         m_handler = NULL;
+
+        delete m_io_context;
+        m_io_context = NULL;
+
+        m_consumerCancelled = false;
+        m_channelError = false;
+        m_replyToActive = false;
+        m_enablingReplyTo = false;
+        m_failed = false;
+
+        m_channelErrorMessage = "";
+        m_messages.clear();
+        m_preReplyToMessages.clear();
+        m_rpcMessages.clear();
     }
 
     bool poll(std::string& error) {
         if(m_failed)
             return false;
 
-        m_io_context.poll();
-        m_io_context.reset();
+        m_io_context->poll();
+        m_io_context->reset();
 
         if(m_handler->error) {
             error = m_handler->errorMessage;
@@ -364,15 +385,23 @@ public:
         return true;
     }
 
+    bool started() {
+        return !!m_io_context;
+    }
+
     bool ready() {
         return m_handler->ready;
     }
 
     void consume(const std::string& queueName, int flags) {
+        if(m_useDedupAlgorithm)
+            flags += AMQP::exclusive;
+
         m_channel->consume(queueName, flags)
             .onReceived([this](const AMQP::Message &message, uint64_t deliveryTag, bool redelivered) {
                 const AMQP::Table& headers = message.headers();
                 const std::string& subject = headers["subject"];
+                const std::string& dupUuid = headers["dup-uuid"];
 
                 AmqpMessagePtr amqpMessage = AmqpMessagePtr(new AmqpMessage);
                 amqpMessage->message = std::string(message.body(), message.bodySize());
@@ -382,6 +411,9 @@ public:
                 amqpMessage->correlationId = message.correlationID();
                 amqpMessage->ack = deliveryTag;
                 amqpMessage->subject = subject;
+                amqpMessage->dupUuid = dupUuid;
+                amqpMessage->dupOrderId = headers["dup-order-id"];
+
                 m_messages.push_back(amqpMessage);
             })
             .onSuccess([](const std::string &consumertag) {
@@ -394,6 +426,39 @@ public:
                 m_channelError = true;
                 m_channelErrorMessage = std::string(message);
             });
+    }
+
+    AmqpMessagePtr getMessage() {
+        if(m_messages.empty())
+            return nullptr;
+
+        auto message = m_messages.front();
+        m_messages.pop_front();
+
+        bool parseMessage = true;
+
+        if(m_useDedupAlgorithm) {
+            if(!message->dupUuid.empty()) {
+                auto it = m_lastReadMessageFromPublisherUuid.find(message->dupUuid);
+
+                if(it != m_lastReadMessageFromPublisherUuid.end()) {
+                    if(message->dupOrderId > it->second)
+                        it->second = message->dupOrderId;
+
+                    else
+                        parseMessage = false;
+
+                } else
+                    m_lastReadMessageFromPublisherUuid[message->dupUuid] = message->dupOrderId;
+            }
+        }
+
+        if(!parseMessage) {
+            ack(message->ack);
+            return nullptr;
+        }
+
+        return message;
     }
 
     bool hasFailed() {
@@ -474,11 +539,16 @@ public:
 
         AMQP::Table headers;
         headers["subject"] = subject;
+        headers["dup-uuid"] = m_uuid;
+        headers["dup-order-id"] = ++m_publishMessageOrderId;
+        headers["sent-at"] = getMsTicks();
+
         publishEnvelope.setHeaders(headers);
         m_channel->publish(exchange, routingKey, publishEnvelope); // we don't need ack yet.
     }
 
     void enableAutoConvertMessageToStream(std::string& subject) { m_autoConvertMessageToStream.insert(subject); }
+    void enableDedupAlgorithm() { m_useDedupAlgorithm = true; }
 
 private:
     void enableReplyTo() {
@@ -520,7 +590,7 @@ private:
             });
     }
 
-    boost::asio::io_context m_io_context;
+    boost::asio::io_context* m_io_context;
     AmqpHandler* m_handler;
     AMQP::TcpChannel* m_channel;
     AMQP::TcpConnection* m_connection;
@@ -530,11 +600,16 @@ private:
     bool m_replyToActive = false;
     bool m_enablingReplyTo = false;
     bool m_failed = false;
+    bool m_useDedupAlgorithm = false;
+
+    uint64_t m_publishMessageOrderId = 0;
 
     std::unordered_set<std::string> m_autoConvertMessageToStream;
+    std::unordered_map<std::string, uint64_t> m_lastReadMessageFromPublisherUuid;
 
     std::string m_channelErrorMessage;
     std::string m_address;
+    std::string m_uuid;
 
     std::list<AmqpMessagePtr> m_messages;
     std::list<AmqpMessagePtr> m_preReplyToMessages;
@@ -564,7 +639,7 @@ double lua_pop_number(lua_State* L)
 int Id = 0;
 std::unordered_map<int, Amqp*> Amqps; 
 
-int amqp_init(lua_State *L)
+int lua_amqp_create(lua_State *L)
 {
     std::string vtable = lua_pop_string(L);
     std::string password = lua_pop_string(L);
@@ -581,22 +656,26 @@ int amqp_init(lua_State *L)
     return 1;
 }
 
-int amqp_ready(lua_State *L)
+int lua_amqp_is_ready(lua_State *L)
 {
     int id = lua_pop_number(L);
 
     Amqp* amqp = Amqps[id];
     if(!amqp) {
-        std::cerr << "amqp_consume !amqp (" << id << ")" << std::endl;
-        lua_pushboolean(L, false);
-        return 1;
+        lua_push_error(L, "!amqp lua_amqp_is_ready");
+        return 0;
+    }
+
+    if(!amqp->started()) {
+        lua_push_error(L, "!amqp started");
+        return 0;
     }
 
     lua_pushboolean(L, amqp->ready());
     return 1;
 }
 
-int amqp_consume(lua_State *L)
+int lua_amqp_consume(lua_State *L)
 {
     int flags = lua_pop_number(L);
     std::string channelName = lua_pop_string(L);
@@ -604,7 +683,12 @@ int amqp_consume(lua_State *L)
 
     Amqp* amqp = Amqps[id];
     if(!amqp) {
-        std::cerr << "amqp_consume !amqp (" << id << ")" << std::endl;
+        lua_push_error(L, "!amqp lua_amqp_consume");
+        return 0;
+    }
+
+    if(!amqp->started()) {
+        lua_push_error(L, "!amqp started");
         return 0;
     }
 
@@ -612,14 +696,19 @@ int amqp_consume(lua_State *L)
     return 0;
 }
 
-int amqp_ack(lua_State *L)
+int lua_amqp_ack(lua_State *L)
 {
     uint64_t ack = lua_pop_number(L);
     int id = lua_pop_number(L);
 
     Amqp* amqp = Amqps[id];
     if(!amqp) {
-        std::cerr << "amqp_ack !amqp (" << id << ")" << std::endl;
+        lua_push_error(L, "!amqp lua_amqp_ack");
+        return 0;
+    }
+
+    if(!amqp->started()) {
+        lua_push_error(L, "!amqp started");
         return 0;
     }
 
@@ -627,14 +716,19 @@ int amqp_ack(lua_State *L)
     return 0;
 }
 
-int amqp_reject(lua_State *L)
+int lua_amqp_reject(lua_State *L)
 {
     uint64_t ack = lua_pop_number(L);
     int id = lua_pop_number(L);
 
     Amqp* amqp = Amqps[id];
     if(!amqp) {
-        std::cerr << "amqp_reject !amqp (" << id << ")" << std::endl;
+        lua_push_error(L, "!amqp lua_amqp_reject");
+        return 0;
+    }
+
+    if(!amqp->started()) {
+        lua_push_error(L, "!amqp started");
         return 0;
     }
 
@@ -642,25 +736,27 @@ int amqp_reject(lua_State *L)
     return 0;
 }
 
-int amqp_get_ready_message(lua_State *L)
+int lua_amqp_get_ready_message(lua_State *L)
 {
     int id = lua_pop_number(L);
 
     Amqp* amqp = Amqps[id];
     if(!amqp) {
-        std::cerr << "amqp_get_ready_message !amqp (" << id << ")" << std::endl;
+        lua_push_error(L, "!amqp lua_amqp_get_ready_message");
         return 0;
     }
 
-    auto& messages = amqp->getMessages();
+    if(!amqp->started()) {
+        lua_push_error(L, "!amqp started");
+        return 0;
+    }
 
-    if(messages.empty()) {
+    auto first = amqp->getMessage();
+
+    if(!first) {
         lua_pushboolean(L, false);
         return 1;
     }
-
-    auto first = messages.front();
-    messages.pop_front();
 
     lua_pushboolean(L, true);
 
@@ -682,7 +778,7 @@ int amqp_get_ready_message(lua_State *L)
     return 8;
 }
 
-int amqp_declare_exchange(lua_State *L)
+int lua_amqp_declare_exchange(lua_State *L)
 {
     int flags = lua_pop_number(L);
     int mode = lua_pop_number(L);
@@ -691,7 +787,12 @@ int amqp_declare_exchange(lua_State *L)
 
     Amqp* amqp = Amqps[id];
     if(!amqp) {
-        std::cerr << "amqp_declare_exchange !amqp (" << id << ")" << std::endl;
+        lua_push_error(L, "!amqp lua_amqp_declare_exchange");
+        return 0;
+    }
+
+    if(!amqp->started()) {
+        lua_push_error(L, "!amqp started");
         return 0;
     }
 
@@ -699,7 +800,7 @@ int amqp_declare_exchange(lua_State *L)
     return 0;
 }
 
-int amqp_declare_queue(lua_State *L)
+int lua_amqp_declare_queue(lua_State *L)
 {
     int nArgs = lua_gettop(L);
     int timeout = 0;
@@ -713,7 +814,12 @@ int amqp_declare_queue(lua_State *L)
 
     Amqp* amqp = Amqps[id];
     if(!amqp) {
-        std::cerr << "amqp_declare_queue !amqp (" << id << ")" << std::endl;
+        lua_push_error(L, "!amqp lua_amqp_declare_queue");
+        return 0;
+    }
+
+    if(!amqp->started()) {
+        lua_push_error(L, "!amqp started");
         return 0;
     }
 
@@ -721,7 +827,7 @@ int amqp_declare_queue(lua_State *L)
     return 0;
 }
 
-int amqp_bind_queue(lua_State *L)
+int lua_amqp_bind_queue(lua_State *L)
 {
     std::string queueName = lua_pop_string(L);
     std::string key = lua_pop_string(L);
@@ -730,7 +836,12 @@ int amqp_bind_queue(lua_State *L)
 
     Amqp* amqp = Amqps[id];
     if(!amqp) {
-        std::cerr << "amqp_bind_queue !amqp (" << id << ")" << std::endl;
+        lua_push_error(L, "!amqp lua_amqp_bind_queue");
+        return 0;
+    }
+
+    if(!amqp->started()) {
+        lua_push_error(L, "!amqp started");
         return 0;
     }
 
@@ -738,14 +849,33 @@ int amqp_bind_queue(lua_State *L)
     return 0;
 }
 
-int enable_auto_convert_message_to_stream(lua_State *L)
+int lua_amqp_start(lua_State *L)
+{
+    int id = lua_pop_number(L);
+
+    Amqp* amqp = Amqps[id];
+    if(!amqp) {
+        lua_push_error(L, "!amqp lua_amqp_start");
+        return 0;
+    }
+
+    amqp->start();
+    return 0;
+}
+
+int lua_amqp_enable_auto_convert_message_to_stream(lua_State *L)
 {
     std::string subject = lua_pop_string(L);
     int id = lua_pop_number(L);
 
     Amqp* amqp = Amqps[id];
     if(!amqp) {
-        std::cerr << "amqp_bind_queue !amqp (" << id << ")" << std::endl;
+        lua_push_error(L, "!amqp lua_amqp_enable_auto_convert_message_to_stream");
+        return 0;
+    }
+
+    if(!amqp->started()) {
+        lua_push_error(L, "!amqp started");
         return 0;
     }
 
@@ -753,15 +883,180 @@ int enable_auto_convert_message_to_stream(lua_State *L)
     return 0;
 }
 
-int64_t getMsTicks() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+int lua_amqp_enable_dedup_algorithm(lua_State *L)
+{
+    int id = lua_pop_number(L);
+
+    Amqp* amqp = Amqps[id];
+    if(!amqp) {
+        lua_push_error(L, "!amqp lua_amqp_enable_dedup_algorithm");
+        return 0;
+    }
+
+    if(!amqp->started()) {
+        lua_push_error(L, "!amqp started");
+        return 0;
+    }
+
+    amqp->enableDedupAlgorithm();
+    return 0;
 }
 
-int table_to_stream(lua_State *L)
+int lua_amqp_poll(lua_State *L)
+{
+    int id = lua_pop_number(L);
+
+    Amqp* amqp = Amqps[id];
+    if(!amqp) {
+        lua_push_error(L, "!amqp lua_amqp_poll");
+        return 1;
+    }
+
+    if(!amqp->started()) {
+        lua_push_error(L, "!amqp started");
+        return 0;
+    }
+
+    std::string error;
+
+    if(!amqp->poll(error)) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, error.c_str());
+        return 2;
+    }
+
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int lua_amqp_publish(lua_State *L)
+{
+    //todo: need to be more reliable
+    std::string expiration = lua_pop_string(L);
+    std::string correlationId = lua_pop_string(L);
+    std::string message = lua_pop_string(L);
+    std::string subject = lua_pop_string(L);
+    std::string routeId = lua_pop_string(L);
+    std::string exchange = lua_pop_string(L);
+    int id = lua_pop_number(L);
+
+    Amqp* amqp = Amqps[id];
+    if(!amqp) {
+        lua_push_error(L, "!amqp lua_amqp_publish");
+        return 0;
+    }
+
+    if(!amqp->started()) {
+        lua_push_error(L, "!amqp started");
+        return 0;
+    }
+
+    if(subject.size() > 1024) {
+        std::stringstream ss;
+        ss << "subject.size() > 1024 " << subject.size();
+        lua_push_error(L, ss.str());
+        return 0;
+    }
+
+    amqp->publish(exchange, routeId, message, subject, correlationId, expiration);
+    return 0;
+}
+
+int lua_amqp_publish_rpc(lua_State *L)
+{
+    std::string expiration = lua_pop_string(L);
+    std::string message = lua_pop_string(L);
+    std::string subject = lua_pop_string(L);
+    std::string routeId = lua_pop_string(L);
+    std::string exchange = lua_pop_string(L);
+    int id = lua_pop_number(L);
+
+    Amqp* amqp = Amqps[id];
+    if(!amqp) {
+        lua_push_error(L, "!amqp lua_amqp_publish");
+        return 0;
+    }
+
+    if(!amqp->started()) {
+        lua_push_error(L, "!amqp started");
+        return 0;
+    }
+
+    std::string correlationId = amqp->publishRPC(exchange, routeId, message, subject, expiration);
+    lua_pushstring(L, correlationId.c_str());
+    return 1;
+}
+
+int lua_amqp_is_ok(lua_State *L)
+{
+    int id = lua_pop_number(L);
+
+    Amqp* amqp = Amqps[id];
+    if(!amqp || amqp->hasFailed()) {
+        lua_pushboolean(L, false);
+        return 1;
+    }
+
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+int lua_amqp_get_rpc_message(lua_State *L)
+{
+    std::string correlationId = lua_pop_string(L);
+    int id = lua_pop_number(L);
+
+    Amqp* amqp = Amqps[id];
+    if(!amqp) {
+        lua_push_error(L, "!amqp lua_amqp_get_rpc_message");
+        return 1;
+    }
+
+    if(!amqp->started()) {
+        lua_push_error(L, "!amqp started");
+        return 0;
+    }
+
+    auto& rpcMessages = amqp->getRPCMessages();
+    auto it = rpcMessages.find(correlationId);
+
+    if(it != rpcMessages.end()) {
+        lua_pushboolean(L, false);
+        lua_pushboolean(L, true);
+        lua_pushlstring(L, it->second.c_str(), it->second.size());
+
+        rpcMessages.erase(it);
+        return 3;
+    }
+
+    lua_pushboolean(L, false);
+    lua_pushboolean(L, false);
+    return 2;
+}
+
+int lua_amqp_terminate(lua_State *L)
+{
+    int id = lua_pop_number(L);
+
+    Amqp* amqp = Amqps[id];
+    if(!amqp) {
+        lua_push_error(L, "!amqp lua_amqp_terminate");
+        return 0;
+    }
+
+    if(!amqp->started()) {
+        lua_push_error(L, "!amqp started");
+        return 0;
+    }
+
+    amqp->terminate();
+    return 0;
+}
+
+int lua_table_to_stream(lua_State *L)
 {
     if(!lua_istable(L, -1)) {
-        lua_pushstring(L, "table_to_stream !lua_istable(L, -1)");
-        lua_error(L);
+        lua_push_error(L, "lua_table_to_stream !lua_istable(L, -1)");
         return 0;
     }
 
@@ -786,11 +1081,10 @@ int table_to_stream(lua_State *L)
     return 1;
 }
 
-int stream_to_table(lua_State *L)
+int lua_stream_to_table(lua_State *L)
 {
     if(!lua_isstring(L, -1)) {
-        lua_pushstring(L, "!stream_to_table !lua_isstring");
-        lua_error(L);
+        lua_push_error(L, "stream_to_table !lua_isstring");
         return 0;
     }
 
@@ -800,191 +1094,70 @@ int stream_to_table(lua_State *L)
     return 1;
 }
 
-int amqp_terminate(lua_State *L)
-{
-    int id = lua_pop_number(L);
-
-    auto it = Amqps.find(id);
-    if(it != Amqps.end()) {
-        delete it->second;
-        Amqps.erase(it);
-    }
-
-    std::cerr << "amqp_terminate !amqp (" << id << ")" << std::endl;
-    return 0;
-}
-
-int amqp_poll(lua_State *L)
-{
-    int id = lua_pop_number(L);
-
-    Amqp* amqp = Amqps[id];
-    if(!amqp) {
-        std::cerr << "amqp_poll !amqp (" << id << ")" << std::endl;
-        lua_pushboolean(L, false);
-        return 1;
-    }
-
-    std::string error;
-
-    if(!amqp->poll(error)) {
-        lua_pushboolean(L, false);
-        lua_pushstring(L, error.c_str());
-        return 2;
-    }
-
-    lua_pushboolean(L, true);
-    return 1;
-}
-
-int amqp_publish(lua_State *L)
-{
-    //todo: need to be more reliable
-    std::string expiration = lua_pop_string(L);
-    std::string correlationId = lua_pop_string(L);
-    std::string message = lua_pop_string(L);
-    std::string subject = lua_pop_string(L);
-    std::string routeId = lua_pop_string(L);
-    std::string exchange = lua_pop_string(L);
-    int id = lua_pop_number(L);
-
-    Amqp* amqp = Amqps[id];
-    if(!amqp) {
-        std::cerr << "amqp_publish !amqp (" << id << ")" << std::endl;
-        return 0;
-    }
-
-    if(subject.size() > 1024) {
-        std::stringstream ss;
-        ss << "subject.size() > 1024 " << subject.size();
-        lua_pushstring(L, ss.str().c_str());
-        lua_error(L);
-    }
-
-    amqp->publish(exchange, routeId, message, subject, correlationId, expiration);
-    return 0;
-}
-
-int amqp_publish_rpc(lua_State *L)
-{
-    std::string expiration = lua_pop_string(L);
-    std::string message = lua_pop_string(L);
-    std::string subject = lua_pop_string(L);
-    std::string routeId = lua_pop_string(L);
-    std::string exchange = lua_pop_string(L);
-    int id = lua_pop_number(L);
-
-    Amqp* amqp = Amqps[id];
-    if(!amqp) {
-        std::cerr << "amqp_publish_rpc !amqp (" << id << ")" << std::endl;
-        return 0;
-    }
-
-    std::string correlationId = amqp->publishRPC(exchange, routeId, message, subject, expiration);
-    lua_pushstring(L, correlationId.c_str());
-    return 1;
-}
-
-int amqp_is_ok(lua_State *L)
-{
-    int id = lua_pop_number(L);
-
-    Amqp* amqp = Amqps[id];
-    if(!amqp || amqp->hasFailed()) {
-        lua_pushboolean(L, false);
-        return 1;
-    }
-
-    lua_pushboolean(L, true);
-    return 1;
-}
-
-int amqp_get_rpc_message(lua_State *L)
-{
-    std::string correlationId = lua_pop_string(L);
-    int id = lua_pop_number(L);
-
-    Amqp* amqp = Amqps[id];
-    if(!amqp) {
-        lua_pushboolean(L, true);
-        return 1;
-    }
-
-    auto& rpcMessages = amqp->getRPCMessages();
-    auto it = rpcMessages.find(correlationId);
-
-    if(it != rpcMessages.end()) {
-        lua_pushboolean(L, false);
-        lua_pushboolean(L, true);
-        lua_pushlstring(L, it->second.c_str(), it->second.size());
-
-        rpcMessages.erase(it);
-        return 3;
-    }
-
-    lua_pushboolean(L, false);
-    lua_pushboolean(L, false);
-    return 2;
-}
-
 /* ... more functions ... */
 
 extern "C" {
 int luaopen_amqpcpp(lua_State *L)
 {
     lua_newtable(L);
-    lua_pushcfunction(L, amqp_init);
-    lua_setfield(L, -2, "init");
+    lua_pushcfunction(L, lua_amqp_create);
+    lua_setfield(L, -2, "create");
 
-    lua_pushcfunction(L, amqp_ready);
-    lua_setfield(L, -2, "ready");
+    lua_pushcfunction (L, lua_amqp_start);
+    lua_setfield(L, -2, "start");
 
-    lua_pushcfunction(L, amqp_terminate);
+    lua_pushcfunction(L, lua_amqp_is_ready);
+    lua_setfield(L, -2, "is_ready");
+
+    lua_pushcfunction(L, lua_amqp_terminate);
     lua_setfield(L, -2, "terminate");
 
-    lua_pushcfunction(L, amqp_get_ready_message);
+    lua_pushcfunction(L, lua_amqp_get_ready_message);
     lua_setfield(L, -2, "get_ready_message");
 
-    lua_pushcfunction(L, amqp_consume);
+    lua_pushcfunction(L, lua_amqp_consume);
     lua_setfield(L, -2, "consume");
 
-    lua_pushcfunction(L, amqp_publish);
+    lua_pushcfunction(L, lua_amqp_publish);
     lua_setfield(L, -2, "publish");
 
-    lua_pushcfunction(L, amqp_publish_rpc);
+    lua_pushcfunction(L, lua_amqp_publish_rpc);
     lua_setfield(L, -2, "publish_rpc");
 
-    lua_pushcfunction(L, amqp_is_ok);
+    lua_pushcfunction(L, lua_amqp_is_ok);
     lua_setfield(L, -2, "is_ok");
 
-    lua_pushcfunction(L, amqp_get_rpc_message);
+    lua_pushcfunction(L, lua_amqp_get_rpc_message);
     lua_setfield(L, -2, "get_rpc_message");
 
-    lua_pushcfunction(L, amqp_ack);
+    lua_pushcfunction(L, lua_amqp_ack);
     lua_setfield(L, -2, "ack");
 
-    lua_pushcfunction(L, amqp_reject);
+    lua_pushcfunction(L, lua_amqp_reject);
     lua_setfield(L, -2, "reject");
 
-    lua_pushcfunction (L, amqp_poll);
+    lua_pushcfunction (L, lua_amqp_poll);
     lua_setfield(L, -2, "poll");
 
-    lua_pushcfunction (L, amqp_declare_exchange);
+    lua_pushcfunction (L, lua_amqp_declare_exchange);
     lua_setfield(L, -2, "declare_exchange");
 
-    lua_pushcfunction (L, amqp_declare_queue);
+    lua_pushcfunction (L, lua_amqp_declare_queue);
     lua_setfield(L, -2, "declare_queue");
 
-    lua_pushcfunction (L, amqp_bind_queue);
+    lua_pushcfunction (L, lua_amqp_bind_queue);
     lua_setfield(L, -2, "bind_queue");
 
-    lua_pushcfunction (L, enable_auto_convert_message_to_stream);
+    lua_pushcfunction (L, lua_amqp_enable_auto_convert_message_to_stream);
     lua_setfield(L, -2, "enable_auto_convert_message_to_stream");
 
-    lua_pushcfunction (L, table_to_stream);
+    lua_pushcfunction (L, lua_amqp_enable_dedup_algorithm);
+    lua_setfield(L, -2, "enable_dedup_algorithm");
+
+    lua_pushcfunction (L, lua_table_to_stream);
     lua_setfield(L, -2, "table_to_stream");
 
-    lua_pushcfunction (L, stream_to_table);
+    lua_pushcfunction (L, lua_stream_to_table);
     lua_setfield(L, -2, "stream_to_table");
 
     return 1;
