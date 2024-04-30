@@ -96,7 +96,7 @@ std::string getLuaTypeName(lua_State *L, int index)
     return std::string(ret ? ret : "?");
 }
 
-void tableToStream(lua_State* L, std::ostream& stream)
+void internalTableToStream(lua_State* L, std::ostream& stream)
 {
     int oldTop = lua_gettop(L);
 
@@ -110,7 +110,7 @@ void tableToStream(lua_State* L, std::ostream& stream)
             if(lua_istable(L, -1)) {
                 char t = s_table;
                 stream.write(&t, 1);
-                tableToStream(L, stream);
+                internalTableToStream(L, stream);
 
             } else
                 tableValueToStream(L, stream, -1);
@@ -132,6 +132,30 @@ void tableToStream(lua_State* L, std::ostream& stream)
     if(newTop != oldTop) {
         lua_push_error(L, "tableToStream newTop != oldTop" );
     }
+}
+
+struct StringStreamBuf : public std::streambuf {
+    std::streamsize xsputn(const char_type* s, std::streamsize n) {
+        buffer.append(s, n);
+        return n;
+    }
+
+    std::string buffer;
+};
+
+void lua_pop_table_to_stream(lua_State *L, StringStreamBuf& result)
+{
+    if(!lua_istable(L, -1)) {
+        lua_push_error(L, "lua_table_to_stream !lua_istable(L, -1)");
+        return;
+    }
+
+    std::ostream stream(&result);
+    char c = 255;
+    stream.write(&c, 1);
+    internalTableToStream(L, stream);
+    lua_pop(L, 1);
+    return;
 }
 
 bool getUChar(const char* stream, size_t& size, unsigned char& attr, size_t maxSize)
@@ -934,7 +958,14 @@ int lua_amqp_publish(lua_State *L)
     //todo: need to be more reliable
     std::string expiration = lua_pop_string(L);
     std::string correlationId = lua_pop_string(L);
-    std::string message = lua_pop_string(L);
+    static StringStreamBuf message;
+    message.buffer.clear();
+
+    if(lua_istable(L, -1))
+        lua_pop_table_to_stream(L, message);
+    else
+        message.buffer = lua_pop_string(L);
+
     std::string subject = lua_pop_string(L);
     std::string routeId = lua_pop_string(L);
     std::string exchange = lua_pop_string(L);
@@ -958,14 +989,21 @@ int lua_amqp_publish(lua_State *L)
         return 0;
     }
 
-    amqp->publish(exchange, routeId, message, subject, correlationId, expiration);
+    amqp->publish(exchange, routeId, message.buffer, subject, correlationId, expiration);
     return 0;
 }
 
 int lua_amqp_publish_rpc(lua_State *L)
 {
     std::string expiration = lua_pop_string(L);
-    std::string message = lua_pop_string(L);
+    static StringStreamBuf message;
+    message.buffer.clear();
+
+    if(lua_istable(L, -1))
+        lua_pop_table_to_stream(L, message);
+    else
+        message.buffer = lua_pop_string(L);
+
     std::string subject = lua_pop_string(L);
     std::string routeId = lua_pop_string(L);
     std::string exchange = lua_pop_string(L);
@@ -982,7 +1020,7 @@ int lua_amqp_publish_rpc(lua_State *L)
         return 0;
     }
 
-    std::string correlationId = amqp->publishRPC(exchange, routeId, message, subject, expiration);
+    std::string correlationId = amqp->publishRPC(exchange, routeId, message.buffer, subject, expiration);
     lua_pushstring(L, correlationId.c_str());
     return 1;
 }
@@ -1060,24 +1098,10 @@ int lua_table_to_stream(lua_State *L)
         return 0;
     }
 
-    struct StringStreamBuf : public std::streambuf {
-        std::streamsize xsputn(const char_type* s, std::streamsize n) {
-            buffer.append(s, n);
-            return n;
-        }
-
-        std::string buffer;
-    };
-
-    static StringStreamBuf stringStreamBuf;
-    std::ostream stream(&stringStreamBuf);
-    char c = 255;
-    stream.write(&c, 1);
-    tableToStream(L, stream);
-
-    lua_pop(L, 1);
-    lua_pushlstring(L, stringStreamBuf.buffer.c_str(), stringStreamBuf.buffer.size());
-    stringStreamBuf.buffer.clear();
+    static StringStreamBuf stream;
+    stream.buffer.clear();
+    lua_pop_table_to_stream(L, stream);
+    lua_pushlstring(L, stream.buffer.c_str(), stream.buffer.size());
     return 1;
 }
 

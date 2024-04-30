@@ -31,8 +31,8 @@ end
 
 function PublishClass:asyncPublish(exchange, routingKey, subject, data, correlationId, expirationMs)
   ngx.timer.at(0, _coPublish, self, exchange, routingKey, subject, data, correlationId, expirationMs)
-end 
-
+end
+ 
 function PublishClass:coPublish(exchange, routingKey, subject, data, correlationId, expirationMs)
   local id = _getPublishConnection(self.connectionConfig)
   amqpcpp.publish(id, exchange, routingKey, subject, data, correlationId or "", tostring(expirationMs or "") or "")
