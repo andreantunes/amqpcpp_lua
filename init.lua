@@ -238,12 +238,12 @@ function ConsumerClass:coConsumeUntilFails(id, onData)
         ngx.log(ngx.ERR, errorOrResult)
       end
 
-      ok, msg, ack, exchange, routingKey, replyTo, correlationId, subject = amqpcpp.get_ready_message(id)
-
       ngx.update_time()
       if ngx.now() * 1000 > maxProcessingTimeTimeout then -- we might have highly intensive actions that might prevent amqpcpp.poll calling fast enough thus causing timeout
         break
-      end 
+      end
+
+      ok, msg, ack, exchange, routingKey, replyTo, correlationId, subject = amqpcpp.get_ready_message(id)
     end
 
     if ngx.worker.exiting() then
