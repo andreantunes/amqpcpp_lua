@@ -80,10 +80,8 @@ void tableValueToStream(lua_State* L, std::ostream& stream, int index)
     }
 }
 
-bool hasValidLuaType(lua_State* L, int index, bool isKey)
+bool hasValidLuaType(lua_State* L, int type, bool isKey)
 {
-    int type = lua_type(L, index);
-
     return type == LUA_TBOOLEAN ||
         type == LUA_TNUMBER ||
         type == LUA_TSTRING ||
@@ -104,7 +102,20 @@ void internalTableToStream(lua_State* L, std::ostream& stream)
 
     while(lua_next(L, -2) != 0) {
         /* uses 'key' (at index -2) and 'value' (at index -1) */
-        if(hasValidLuaType(L, -2, true) && hasValidLuaType(L, -1, false)) {
+        int valueType = lua_type(L, -1);
+
+        if(valueType == LUA_TLIGHTUSERDATA) {
+            void* value = lua_touserdata(L, -1);
+
+            if(!value) { // ngx.null
+                lua_pop(L, 1);
+                continue;
+            }
+        }
+
+        int keyType = lua_type(L, -2);
+
+        if(hasValidLuaType(L, keyType, true) && hasValidLuaType(L, valueType, false)) {
             tableValueToStream(L, stream, -2);
 
             if(lua_istable(L, -1)) {

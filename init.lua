@@ -71,6 +71,7 @@ function PublishClass:coWaitForRpcAnswer(connectionId, correlationId, expiration
     end 
   
     if ngx.now() * 1000 > timeout then
+      ngx.log(ngx.ERR, "Rabbit waiting for answer timed out.")
       return false
     end
   
