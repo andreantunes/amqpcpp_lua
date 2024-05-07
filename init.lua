@@ -123,7 +123,7 @@ function _getPublishConnection(connectionConfig)
   end
 
   if connecting then
-    print("Connected to rabbit!");
+    --print("Connected to rabbit!");
   end
 
   return id
