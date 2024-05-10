@@ -3,7 +3,6 @@ local amqpcpp = require('amqpcpp')
 local _getPublishConnection
 local _getPublisher
 
-local p_publishConnections = { }
 local PublishClass = { }
 
 function _getPublisher(connectionConfig)
@@ -69,7 +68,7 @@ end
 
 function PublishClass:coWaitForRpcAnswer(correlationId, expirationMs)
   ngx.update_time()
-  local timeout = ngx.now() * 1000 + expirationMs
+  local timeout = ngx.now() * 1000 + expirationMs 
 
   while true do
     local success, message = amqpcpp.get_rpc_message(self.connectionId, correlationId)
@@ -92,45 +91,26 @@ function PublishClass:coWaitForRpcAnswer(correlationId, expirationMs)
 end
 
 function _getPublishConnection(connectionConfig)
-  local connectionHash = table.concat({ connectionConfig.host, connectionConfig.port, connectionConfig.username, connectionConfig.password, connectionConfig.vhost })
-  local id = p_publishConnections[connectionHash]
-  local connecting = false
+  local id = amqpcpp.create(connectionConfig.host, connectionConfig.port, connectionConfig.username, connectionConfig.password, connectionConfig.vhost)
+  amqpcpp.start(id)
 
-  if not id then
-    connecting = true
-    id = amqpcpp.create(connectionConfig.host, connectionConfig.port, connectionConfig.username, connectionConfig.password, connectionConfig.vhost)
-    amqpcpp.start(id)
+  ngx.timer.at(0, function()
+    while true do
+      local ok, err = amqpcpp.poll(id)
 
-    p_publishConnections[connectionHash] = id
-
-    ngx.timer.at(0, function()
-      while true do
-        local ok, err = amqpcpp.poll(id)
- 
-        if not ok then
-          amqpcpp.terminate(id)
-          ngx.log(ngx.ERR, err)
-          amqpcpp.start(id)
-        end
-
-        ngx.sleep(0.032)
-
-        if ngx.worker.exiting() then
-          break
-        end
+      if not ok then
+        amqpcpp.terminate(id)
+        ngx.log(ngx.ERR, err)
+        amqpcpp.start(id)
       end
-    end)
-  end
 
-  --[[
-  while not amqpcpp.is_ready(id) do
-    ngx.sleep(0.032)
+      ngx.sleep(0.032)
 
-    if ngx.worker.exiting() then
-      break
+      if ngx.worker.exiting() then
+        break
+      end
     end
-  end
-  ]]
+  end)
 
   return id
 end
