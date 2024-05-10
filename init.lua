@@ -7,74 +7,82 @@ local p_publishConnections = { }
 local PublishClass = { }
 
 function _getPublisher(connectionConfig)
-  local t = {
-    connectionConfig = connectionConfig
-  }
-
   if not connectionConfig.host or
     not connectionConfig.port or
     not connectionConfig.username or
     not connectionConfig.password or
     not connectionConfig.vhost then
 
-    ngx.log(ngx.ERR, "could not initialize rabbitmq, no config found.")
+    ngx.log(ngx.ERR, "could not initialize rabbitmq, no config found. " .. debug.traceback())
     return
   end
+
+  local t = {
+    connectionConfig = connectionConfig,
+    connectionId = _getPublishConnection(connectionConfig)
+  }
 
   setmetatable(t, { __index = PublishClass })
   return t
 end
-
-local function _coPublish(premature, ...)
-  PublishClass.coPublish(...)
-end
-
-function PublishClass:asyncPublish(exchange, routingKey, subject, data, correlationId, expirationMs)
-  ngx.timer.at(0, _coPublish, self, exchange, routingKey, subject, data, correlationId, expirationMs)
-end
  
-function PublishClass:coPublish(exchange, routingKey, subject, data, correlationId, expirationMs)
-  local id = _getPublishConnection(self.connectionConfig)
-  amqpcpp.publish(id, exchange, routingKey, subject, data, correlationId or "", tostring(expirationMs or "") or "")
-end 
-
-function PublishClass:cpPublishRpc(exchange, routingKey, subject, data, expirationMs)
-  local id = _getPublishConnection(self.connectionConfig)
-  local correlationId = amqpcpp.publish_rpc(id, exchange, routingKey, subject, data, tostring(expirationMs or ""))
-  return id, correlationId
+function PublishClass:asyncPublish(exchange, routingKey, subject, data, correlationId, expirationMs)
+  amqpcpp.publish(self.connectionId, exchange, routingKey, subject, data, correlationId or "", tostring(expirationMs or "") or "")
 end
 
-function PublishClass:coPublishRpcAndWait(exchange, routingKey, subject, data, expirationMs)
-  local id = _getPublishConnection(self.connectionConfig)
-  local correlationId = amqpcpp.publish_rpc(id, exchange, routingKey, subject, data, tostring(expirationMs or ""))
-  return self:coWaitForRpcAnswer(id, correlationId, expirationMs)
+function PublishClass:asyncPublishRpc(exchange, routingKey, subject, data, expirationMs)
+  return amqpcpp.publish_rpc(self.connectionId, exchange, routingKey, subject, data, tostring(expirationMs or ""))
 end
 
-function PublishClass:coDeclareQueue(queueName, timeout)
-  local id = _getPublishConnection(self.connectionConfig)
-  amqpcpp.declare_queue(id, queueName, 0, timeout or 0)
+function PublishClass:coPublishRpc(exchange, routingKey, subject, data, expirationMs)
+  local correlationId = self:asyncPublishRpc(exchange, routingKey, subject, data, expirationMs)
+  return self:coWaitForRpcAnswer(correlationId, expirationMs)
 end
 
-function PublishClass:coWaitForRpcAnswer(connectionId, correlationId, expirationMs)
+function PublishClass:asyncDeclareQueue(queueName, queueTimeout)
+  amqpcpp.declare_queue(self.connectionId, queueName, 0, queueTimeout or 0)
+end
+
+function PublishClass:coWaitForDeclaredQueue(queueName, expirationMs)
+  ngx.update_time()
   local timeout = ngx.now() * 1000 + expirationMs
 
   while true do
-    local amqpFailed, success, message = amqpcpp.get_rpc_message(connectionId, correlationId)
+    local success = amqpcpp.declare_queue_is_ready(self.connectionId, queueName)
+
+    if success then
+      return true
+    end
   
-    if amqpFailed then
-      ngx.log(ngx.ERR, "Connection failed, could not retrieve.")
-      return false  
-    end  
-  
+    if ngx.now() * 1000 > timeout then
+      ngx.log(ngx.ERR, "Rabbit coWaitForDeclaredQueue timed out. " .. debug.traceback())
+      return false
+    end
+
+    ngx.sleep(0.032)
+
+    if ngx.worker.exiting() then
+      return false
+    end
+  end
+end
+
+function PublishClass:coWaitForRpcAnswer(correlationId, expirationMs)
+  ngx.update_time()
+  local timeout = ngx.now() * 1000 + expirationMs
+
+  while true do
+    local success, message = amqpcpp.get_rpc_message(self.connectionId, correlationId)
+
     if success then
       return true, message
     end 
-  
+
     if ngx.now() * 1000 > timeout then
-      ngx.log(ngx.ERR, "Rabbit waiting for answer timed out.")
+      ngx.log(ngx.ERR, "Rabbit waiting for answer timed out." .. debug.traceback())
       return false
     end
-  
+
     ngx.sleep(0.032)
 
     if ngx.worker.exiting() then
@@ -114,6 +122,7 @@ function _getPublishConnection(connectionConfig)
     end)
   end
 
+  --[[
   while not amqpcpp.is_ready(id) do
     ngx.sleep(0.032)
 
@@ -121,10 +130,7 @@ function _getPublishConnection(connectionConfig)
       break
     end
   end
-
-  if connecting then
-    --print("Connected to rabbit!");
-  end
+  ]]
 
   return id
 end

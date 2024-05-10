@@ -417,6 +417,8 @@ public:
             return false;
         }
 
+        cleanDeclaredQueues();
+
         return true;
     }
 
@@ -556,7 +558,14 @@ public:
         if(timeout > 0)
             declareQueueArguments["x-expires"] = timeout;
 
-        m_channel->declareQueue(queueName, flags, declareQueueArguments);
+        m_channel->declareQueue(queueName, flags, declareQueueArguments)
+            .onSuccess([queueName, this] {
+                m_declaredQueues[queueName] = getMsTicks();
+            });
+    }
+
+    bool hasFinishedDeclaringQueue(const std::string& queueName) {
+        return m_declaredQueues.find(queueName) != m_declaredQueues.end();
     }
 
     void bindQueue(const std::string& exchangeName, const std::string& queueName, const std::string& routingKey) {
@@ -586,6 +595,24 @@ public:
     void enableDedupAlgorithm() { m_useDedupAlgorithm = true; }
 
 private:
+    void cleanDeclaredQueues() {
+        int64_t now = getMsTicks();
+
+        if(now - m_lastDeclaredQueuesClean < 5*60*1000)
+            return;
+
+        m_lastDeclaredQueuesClean = now;
+
+        for(auto it = m_declaredQueues.begin(), end = m_declaredQueues.end(); it != end;) {
+            if(now - it->second > 60*5*1000) {
+                it = m_declaredQueues.erase(it);
+                end = m_declaredQueues.end();
+
+            } else
+                it++;
+        }
+    }
+
     void enableReplyTo() {
         if(m_enablingReplyTo || m_replyToActive)
             return;
@@ -641,6 +668,9 @@ private:
 
     std::unordered_set<std::string> m_autoConvertMessageToStream;
     std::unordered_map<std::string, uint64_t> m_lastReadMessageFromPublisherUuid;
+    std::unordered_map<std::string, int64_t> m_declaredQueues;
+
+    int64_t m_lastDeclaredQueuesClean = 0;
 
     std::string m_channelErrorMessage;
     std::string m_address;
@@ -862,6 +892,26 @@ int lua_amqp_declare_queue(lua_State *L)
     return 0;
 }
 
+int lua_amqp_declare_queue_is_ready(lua_State *L)
+{
+    std::string queueName = lua_pop_string(L);
+    int id = lua_pop_number(L);
+
+    Amqp* amqp = Amqps[id];
+    if(!amqp) {
+        lua_push_error(L, "!amqp lua_amqp_declare_queue");
+        return 0;
+    }
+
+    if(!amqp->started()) {
+        lua_push_error(L, "!amqp started");
+        return 0;
+    }
+
+    lua_pushboolean(L, amqp->hasFinishedDeclaringQueue(queueName));
+    return 1;
+}
+
 int lua_amqp_bind_queue(lua_State *L)
 {
     std::string queueName = lua_pop_string(L);
@@ -1058,7 +1108,7 @@ int lua_amqp_get_rpc_message(lua_State *L)
     Amqp* amqp = Amqps[id];
     if(!amqp) {
         lua_push_error(L, "!amqp lua_amqp_get_rpc_message");
-        return 1;
+        return 0;
     }
 
     if(!amqp->started()) {
@@ -1070,17 +1120,15 @@ int lua_amqp_get_rpc_message(lua_State *L)
     auto it = rpcMessages.find(correlationId);
 
     if(it != rpcMessages.end()) {
-        lua_pushboolean(L, false);
         lua_pushboolean(L, true);
         lua_pushlstring(L, it->second.c_str(), it->second.size());
 
         rpcMessages.erase(it);
-        return 3;
+        return 2;
     }
 
     lua_pushboolean(L, false);
-    lua_pushboolean(L, false);
-    return 2;
+    return 1;
 }
 
 int lua_amqp_terminate(lua_State *L)
@@ -1179,6 +1227,9 @@ int luaopen_amqpcpp(lua_State *L)
 
     lua_pushcfunction (L, lua_amqp_declare_queue);
     lua_setfield(L, -2, "declare_queue");
+
+    lua_pushcfunction (L, lua_amqp_declare_queue_is_ready);
+    lua_setfield(L, -2, "declare_queue_is_ready");
 
     lua_pushcfunction (L, lua_amqp_bind_queue);
     lua_setfield(L, -2, "bind_queue");
