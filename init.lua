@@ -124,7 +124,9 @@ function _getConsumer(connectionConfig)
     bindings = { },
     exchanges = { },
     autoConvertMesageToStreamSubjects = { },
-    dedupAlgorithm = false
+    dedupAlgorithm = false,
+    declareQueues = { },
+    consumeQueues = { }
   }
 
   if not connectionConfig.host or
@@ -160,8 +162,12 @@ function ConsumerClass:syncLoop(onData)
   end
 end
 
-function ConsumerClass:init(queueName)
-  self.queueName = queueName
+function ConsumerClass:declareQueue(name, durable)
+  table.insert(self.declareQueues, { name = name, durable = durable })
+end
+
+function ConsumerClass:consumeQueue(name)
+  table.insert(self.consumeQueues, { name = name })
 end
 
 function ConsumerClass:enableAutoConvertMessageToStream(subject)
@@ -172,34 +178,63 @@ function ConsumerClass:enableDedupAlgorithm()
   self.dedupAlgorithm = true
 end 
 
-function ConsumerClass:bind(exchange, queueName, routingKey)
+function ConsumerClass:bindQueue(exchange, queueName, routingKey)
   table.insert(self.bindings, { exchange = exchange, queueName = queueName, routingKey = routingKey })
 end
 
-function ConsumerClass:declareExchange(exchange, mode, flags)
-  table.insert(self.exchanges, { exchange = exchange, mode = mode, flags = flags })
+function ConsumerClass:declareExchange(exchange, mode, durable)
+  table.insert(self.exchanges, { exchange = exchange, mode = mode, durable = durable })
 end
 
 function ConsumerClass:coConsumeUntilFails(id, onData)
   if self.dedupAlgorithm then
     amqpcpp.enable_dedup_algorithm(id) 
   end
-
+ 
   for _, subject in ipairs(self.autoConvertMesageToStreamSubjects) do
     amqpcpp.enable_auto_convert_message_to_stream(id, subject)
   end
 
   for _, exchange in ipairs(self.exchanges) do
-    amqpcpp.declare_exchange(id, exchange.exchange, exchange.mode, exchange.flags)
+    local mode = 0
+    if exchange.mode == "fanout" then
+      mode = 0
+
+    elseif exchange.mode == "direct" then
+      mode = 1
+
+    elseif exchange.mode == "topic" then
+      mode = 2
+
+    elseif exchange.mode == "headers" then
+      mode = 3
+    end
+
+    local flags = 0
+    if exchange.durable then
+      flags = 1
+    end
+
+    amqpcpp.declare_exchange(id, exchange.exchange, mode, flags)
   end
 
-  amqpcpp.declare_queue(id, self.queueName, 0)
+  for _, declare in ipairs(self.declareQueues) do
+    local flags = 0
+
+    if declare.durable then
+      flags = 1
+    end
+
+    amqpcpp.declare_queue(id, declare.name, flags)
+  end
 
   for _, binding in ipairs(self.bindings) do
-    amqpcpp.bind_queue(id, binding.exchange, binding.queueName, binding.routingKey)
+    amqpcpp.bind_queue(id, binding.exchange, binding.routingKey, binding.queueName)
   end
 
-  amqpcpp.consume(id, self.queueName, 0)
+  for _, consume in ipairs(self.consumeQueues) do
+    amqpcpp.consume(id, consume.name, 0)
+  end
 
   while true do
     local ok, err = amqpcpp.poll(id)
