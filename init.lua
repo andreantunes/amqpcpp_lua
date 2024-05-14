@@ -178,7 +178,7 @@ function ConsumerClass:enableDedupAlgorithm()
   self.dedupAlgorithm = true
 end 
 
-function ConsumerClass:bindQueue(exchange, queueName, routingKey)
+function ConsumerClass:bindQueue(exchange, routingKey, queueName)
   table.insert(self.bindings, { exchange = exchange, queueName = queueName, routingKey = routingKey })
 end
 
