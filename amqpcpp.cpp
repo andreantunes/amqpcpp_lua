@@ -550,6 +550,10 @@ public:
         m_channel->declareExchange(exchangeName, AMQP::ExchangeType(mode), flags);
     }
 
+    void removeQueue(const std::string& queueName) {
+        m_channel->removeQueue(queueName);
+    }
+
     void declareQueue(const std::string& queueName, int flags, int timeout) {
         AMQP::Table declareQueueArguments;
         //declareQueueArquments["x-queue-type"] = "quorum";
@@ -912,6 +916,27 @@ int lua_amqp_declare_queue_is_ready(lua_State *L)
     return 1;
 }
 
+int lua_amqp_remove_queue(lua_State *L)
+{
+    std::string queueName = lua_pop_string(L);
+    int id = lua_pop_number(L);
+
+    Amqp* amqp = Amqps[id];
+    if(!amqp) {
+        lua_push_error(L, "!amqp lua_amqp_remove_queue");
+        return 0;
+    }
+
+    if(!amqp->started()) {
+        lua_push_error(L, "!amqp started");
+        return 0;
+    }
+
+    amqp->removeQueue(queueName);
+
+    return 0;
+}
+
 int lua_amqp_bind_queue(lua_State *L)
 {
     std::string queueName = lua_pop_string(L);
@@ -1230,6 +1255,9 @@ int luaopen_amqpcpp(lua_State *L)
 
     lua_pushcfunction (L, lua_amqp_declare_queue_is_ready);
     lua_setfield(L, -2, "declare_queue_is_ready");
+
+    lua_pushcfunction (L, lua_amqp_remove_queue);
+    lua_setfield(L, -2, "remove_queue");
 
     lua_pushcfunction (L, lua_amqp_bind_queue);
     lua_setfield(L, -2, "bind_queue");

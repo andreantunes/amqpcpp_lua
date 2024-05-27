@@ -42,6 +42,10 @@ function PublishClass:asyncDeclareQueue(queueName, queueTimeout)
   amqpcpp.declare_queue(self.connectionId, queueName, 0, queueTimeout or 0)
 end
 
+function PublishClass:asyncRemoveQueue(queueName)
+  amqpcpp.remove_queue(self.connectionId, queueName)
+end
+
 function PublishClass:coWaitForDeclaredQueue(queueName, expirationMs)
   ngx.update_time()
   local timeout = ngx.now() * 1000 + expirationMs
