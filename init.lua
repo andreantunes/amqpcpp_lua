@@ -18,13 +18,17 @@ function _getPublisher(connectionConfig)
 
   local t = {
     connectionConfig = connectionConfig,
-    connectionId = _getPublishConnection(connectionConfig)
+    connectionId = nil,
+    autoPoll = true,
   }
+
+  local connectionId = _getPublishConnection(connectionConfig, t)
+  t.connectionId = connectionId
 
   setmetatable(t, { __index = PublishClass })
   return t
 end
- 
+
 function PublishClass:asyncPublish(exchange, routingKey, subject, data, correlationId, expirationMs)
   amqpcpp.publish(self.connectionId, exchange, routingKey, subject, data, correlationId or "", tostring(expirationMs or "") or "")
 end
@@ -56,30 +60,26 @@ function PublishClass:coWaitForDeclaredQueue(queueName, expirationMs)
     if success then
       return true
     end
-  
+
     if ngx.now() * 1000 > timeout then
       ngx.log(ngx.ERR, "Rabbit coWaitForDeclaredQueue timed out. " .. debug.traceback())
       return false
     end
 
     ngx.sleep(0.032)
-
-    if ngx.worker.exiting() then
-      return false
-    end
   end
 end
 
 function PublishClass:coWaitForRpcAnswer(correlationId, expirationMs)
   ngx.update_time()
-  local timeout = ngx.now() * 1000 + expirationMs 
+  local timeout = ngx.now() * 1000 + expirationMs
 
   while true do
     local success, message = amqpcpp.get_rpc_message(self.connectionId, correlationId)
 
     if success then
       return true, message
-    end 
+    end
 
     if ngx.now() * 1000 > timeout then
       ngx.log(ngx.ERR, "Rabbit waiting for answer timed out." .. debug.traceback())
@@ -87,14 +87,45 @@ function PublishClass:coWaitForRpcAnswer(correlationId, expirationMs)
     end
 
     ngx.sleep(0.032)
-
-    if ngx.worker.exiting() then
-      return false
-    end
   end
 end
 
-function _getPublishConnection(connectionConfig)
+function PublishClass:stopCyclePoll()
+  self.autoPoll = false
+end
+
+function PublishClass:poll()
+  local ok, err = amqpcpp.poll(self.connectionId)
+
+  if not ok then
+    ngx.log(ngx.ERR, err)
+    return false
+  end
+
+  return true
+end
+
+function PublishClass:coFlushAndExit()
+  amqpcpp.declare_queue(self.connectionId, "__exiting", 0, 0)
+
+  while true do
+    local ok, err = amqpcpp.poll(self.connectionId)
+
+    if amqpcpp.declare_queue_is_ready(self.connectionId, "__exiting") then
+      return
+    end
+
+    if not ok then
+      amqpcpp.terminate(self.connectionId)
+      ngx.log(ngx.ERR, err)
+      break
+    end
+
+    ngx.sleep(0.032)
+  end
+end
+
+function _getPublishConnection(connectionConfig, publish)
   local id = amqpcpp.create(connectionConfig.host, connectionConfig.port, connectionConfig.username, connectionConfig.password, connectionConfig.vhost)
   amqpcpp.start(id)
 
@@ -110,7 +141,7 @@ function _getPublishConnection(connectionConfig)
 
       ngx.sleep(0.032)
 
-      if ngx.worker.exiting() then
+      if not publish.autoPoll then
         break
       end
     end
@@ -123,7 +154,7 @@ local _getConsumer
 local ConsumerClass = { }
 
 function _getConsumer(connectionConfig)
-  local t = { 
+  local t = {
     connectionConfig = connectionConfig,
     bindings = { },
     exchanges = { },
@@ -143,7 +174,7 @@ function _getConsumer(connectionConfig)
     return
   end
 
-  setmetatable(t, { 
+  setmetatable(t, {
     __index = ConsumerClass,
   })
 
@@ -180,7 +211,7 @@ end
 
 function ConsumerClass:enableDedupAlgorithm()
   self.dedupAlgorithm = true
-end 
+end
 
 function ConsumerClass:bindQueue(exchange, routingKey, queueName)
   table.insert(self.bindings, { exchange = exchange, queueName = queueName, routingKey = routingKey })
@@ -192,9 +223,9 @@ end
 
 function ConsumerClass:coConsumeUntilFails(id, onData)
   if self.dedupAlgorithm then
-    amqpcpp.enable_dedup_algorithm(id) 
+    amqpcpp.enable_dedup_algorithm(id)
   end
- 
+
   for _, subject in ipairs(self.autoConvertMesageToStreamSubjects) do
     amqpcpp.enable_auto_convert_message_to_stream(id, subject)
   end
@@ -240,6 +271,8 @@ function ConsumerClass:coConsumeUntilFails(id, onData)
     amqpcpp.consume(id, consume.name, 0)
   end
 
+  local exiting = false
+
   while true do
     local ok, err = amqpcpp.poll(id)
 
@@ -248,32 +281,39 @@ function ConsumerClass:coConsumeUntilFails(id, onData)
       break
     end
 
-    local ok, msg, ack, exchange, routingKey, replyTo, correlationId, subject = amqpcpp.get_ready_message(id)
-    local maxProcessingTimeTimeout = ngx.now() * 1000 + (100)
+    if not ngx.worker.exiting() then
+      local ok, msg, ack, exchange, routingKey, replyTo, correlationId, subject = amqpcpp.get_ready_message(id)
+      local maxProcessingTimeTimeout = ngx.now() * 1000 + (100)
 
-    while ok do
-      local callOk, errorOrResult = pcall(onData, msg, subject, exchange, routingKey, replyTo, correlationId)
-      if callOk then
-        if errorOrResult == false then
-          amqpcpp.reject(id, ack)
+      while ok do
+        local callOk, errorOrResult = pcall(onData, msg, subject, exchange, routingKey, replyTo, correlationId)
+        if callOk then
+          if errorOrResult == false then
+            amqpcpp.reject(id, ack)
+          else
+            amqpcpp.ack(id, ack)
+          end
         else
           amqpcpp.ack(id, ack)
+          ngx.log(ngx.ERR, errorOrResult)
         end
-      else
-        amqpcpp.ack(id, ack)
-        ngx.log(ngx.ERR, errorOrResult)
+
+        ngx.update_time()
+        if ngx.now() * 1000 > maxProcessingTimeTimeout then -- we might have highly intensive actions that might prevent amqpcpp.poll calling fast enough thus causing timeout
+          break
+        end
+
+        ok, msg, ack, exchange, routingKey, replyTo, correlationId, subject = amqpcpp.get_ready_message(id)
+      end
+    else
+      if not exiting then
+        exiting = true
+        amqpcpp.declare_queue(id, "__exiting", 0, 0)
       end
 
-      ngx.update_time()
-      if ngx.now() * 1000 > maxProcessingTimeTimeout then -- we might have highly intensive actions that might prevent amqpcpp.poll calling fast enough thus causing timeout
+      if amqpcpp.declare_queue_is_ready(id, "__exiting") then
         break
       end
-
-      ok, msg, ack, exchange, routingKey, replyTo, correlationId, subject = amqpcpp.get_ready_message(id)
-    end
-
-    if ngx.worker.exiting() then
-      break
     end
 
     ngx.sleep(0.032)
