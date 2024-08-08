@@ -2,8 +2,17 @@ local amqpcpp = require('amqpcpp')
 
 local _getPublishConnection
 local _getPublisher
+local _coTest
 
 local PublishClass = { }
+
+function _coTest(connectionConfig, waitTimeMs)
+  local publisher = _getPublisher(connectionConfig)
+  publisher:asyncDeclareQueue("_testConn")
+  local result = publisher:coWaitForDeclaredQueue("_testConn", waitTimeMs)
+  publisher:stopCyclePoll()
+  return result
+end
 
 function _getPublisher(connectionConfig)
   if not connectionConfig.host or
@@ -12,7 +21,7 @@ function _getPublisher(connectionConfig)
     not connectionConfig.password or
     not connectionConfig.vhost then
 
-    ngx.log(ngx.ERR, "could not initialize rabbitmq, no config found. " .. debug.traceback())
+    ngx.log(ngx.ERR, "amqpcpp_helper error: could not initialize rabbitmq, no config found. " .. debug.traceback())
     return
   end
 
@@ -62,7 +71,7 @@ function PublishClass:coWaitForDeclaredQueue(queueName, expirationMs)
     end
 
     if ngx.now() * 1000 > timeout then
-      ngx.log(ngx.ERR, "Rabbit coWaitForDeclaredQueue timed out. " .. debug.traceback())
+      ngx.log(ngx.ERR, "amqpcpp_helper error: coWaitForDeclaredQueue timed out. " .. debug.traceback())
       return false
     end
 
@@ -82,7 +91,7 @@ function PublishClass:coWaitForRpcAnswer(correlationId, expirationMs)
     end
 
     if ngx.now() * 1000 > timeout then
-      ngx.log(ngx.ERR, "Rabbit waiting for answer timed out." .. debug.traceback())
+      ngx.log(ngx.ERR, "amqpcpp_helper error: waiting for answer timed out." .. debug.traceback())
       return false
     end
 
@@ -98,7 +107,7 @@ function PublishClass:poll()
   local ok, err = amqpcpp.poll(self.connectionId)
 
   if not ok then
-    ngx.log(ngx.ERR, err)
+    ngx.log(ngx.ERR, "amqpcpp_helper error: " .. tostring(err))
     return false
   end
 
@@ -117,7 +126,7 @@ function PublishClass:coFlushAndExit()
 
     if not ok then
       amqpcpp.terminate(self.connectionId)
-      ngx.log(ngx.ERR, err)
+      ngx.log(ngx.ERR, "amqpcpp_helper error: " .. tostring(err))
       break
     end
 
@@ -135,8 +144,9 @@ function _getPublishConnection(connectionConfig, publish)
 
       if not ok then
         amqpcpp.terminate(id)
-        ngx.log(ngx.ERR, err)
+        ngx.log(ngx.ERR, "amqpcpp_helper error: " .. tostring(err) .. " " .. connectionConfig.host .. ":" .. connectionConfig.port .. " user:" .. connectionConfig.username)
         amqpcpp.start(id)
+        ngx.sleep(1)
       end
 
       ngx.sleep(0.032)
@@ -170,7 +180,7 @@ function _getConsumer(connectionConfig)
     not connectionConfig.password or
     not connectionConfig.vhost then
 
-    ngx.log(ngx.ERR, "could not initialize rabbitmq, no config found.")
+    ngx.log(ngx.ERR, "amqpcpp_helper error: could not initialize rabbitmq, no config found.")
     return
   end
 
@@ -277,7 +287,7 @@ function ConsumerClass:coConsumeUntilFails(id, onData)
     local ok, err = amqpcpp.poll(id)
 
     if not ok then
-      ngx.log(ngx.ERR, err)
+      ngx.log(ngx.ERR, "amqpcpp_helper error: " .. tostring(err))
       break
     end
 
@@ -295,7 +305,7 @@ function ConsumerClass:coConsumeUntilFails(id, onData)
           end
         else
           amqpcpp.ack(id, ack)
-          ngx.log(ngx.ERR, errorOrResult)
+          ngx.log(ngx.ERR, "amqpcpp_helper error: " .. tostring(errorOrResult))
         end
 
         ngx.update_time()
@@ -321,6 +331,7 @@ function ConsumerClass:coConsumeUntilFails(id, onData)
 end
 
 return {
+  coTest = _coTest,
   getPublisher = _getPublisher,
   getConsumer = _getConsumer,
   tableToStream = amqpcpp.table_to_stream,
