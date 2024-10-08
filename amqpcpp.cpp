@@ -706,7 +706,7 @@ double lua_pop_number(lua_State* L)
 }
 
 int Id = 0;
-std::unordered_map<int, Amqp*> Amqps; 
+std::unordered_map<int, Amqp*> Amqps;
 
 int lua_amqp_create(lua_State *L)
 {
@@ -830,10 +830,14 @@ int lua_amqp_get_ready_message(lua_State *L)
     lua_pushboolean(L, true);
 
     auto& autoConvertMessageToStream = amqp->getAutoConvertMessageToStream();
-    
+
     if(autoConvertMessageToStream.count(first->subject)) {
-        size_t sizePos = 0;
-        streamToTable(first->message.c_str(), L, sizePos, first->message.size());
+        if(!first->message.empty() && ((unsigned char)first->message[0] != 255 && first->message[0] != s_table))
+            lua_pushlstring(L, first->message.c_str(), first->message.size());
+        else {
+            size_t sizePos = 0;
+            streamToTable(first->message.c_str(), L, sizePos, first->message.size());
+        }
     } else
         lua_pushlstring(L, first->message.c_str(), first->message.size());
 
