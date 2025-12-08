@@ -23,7 +23,11 @@ enum {
     s_string = 3,
     s_boolean = 4,
     s_settable = 5,
-    s_lstring = 6
+    s_lstring = 6,
+    s_uint8 = 7,
+    s_uint16 = 8,
+    s_uint32 = 9,
+    s_uint64 = 10,
 };
 
 void lua_push_error(lua_State* L, const std::string& error)
@@ -179,6 +183,36 @@ bool getUChar(const char* stream, size_t& size, unsigned char& attr, size_t maxS
     return true;
 }
 
+bool getU16(const char* stream, size_t& size, uint16_t& attr, size_t maxSize)
+{
+    if(size + 2 >= maxSize)
+        return false;
+
+    attr = *(uint16_t*)(stream + size);
+    size += 2;
+    return true;
+}
+
+bool getU32(const char* stream, size_t& size, uint32_t& attr, size_t maxSize)
+{
+    if(size + 4 >= maxSize)
+        return false;
+
+    attr = *(uint32_t*)(stream + size);
+    size += 4;
+    return true;
+}
+
+bool getU64(const char* stream, size_t& size, uint64_t& attr, size_t maxSize)
+{
+    if(size + 8 >= maxSize)
+        return false;
+
+    attr = *(uint64_t*)(stream + size);
+    size += 8;
+    return true;
+}
+
 bool getDouble(const char* stream, size_t& size, double& attr, size_t maxSize)
 {
     if(size + sizeof(double) >= maxSize)
@@ -240,6 +274,47 @@ void streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSiz
 
         if(attr == s_table) {
             lua_newtable(L);
+
+        } else if(attr == s_uint8) {
+            uint8_t value;
+
+            if(!getUChar(stream, size, value, maxSize)) {
+                lua_push_error(L, "streamToTable !stream.uint8(value) ");
+                break;
+            }
+
+            lua_pushnumber(L, value);
+
+        } else if(attr == s_uint16) {
+            uint16_t value;
+
+            if(!getU16(stream, size, value, maxSize)) {
+                lua_push_error(L, "streamToTable !stream.uint16(value) ");
+                break;
+            }
+
+            lua_pushnumber(L, value);
+
+        } else if(attr == s_uint32) {
+            uint32_t value;
+
+            if(!getU32(stream, size, value, maxSize)) {
+                lua_push_error(L, "streamToTable !stream.uint32(value) ");
+                break;
+            }
+
+            lua_pushnumber(L, value);
+
+        } else if(attr == s_uint64) {
+            uint64_t value;
+
+            if(!getU64(stream, size, value, maxSize)) {
+                lua_push_error(L, "streamToTable !stream.uint64(value) ");
+                break;
+            }
+
+            lua_pushnumber(L, value);
+
 
         } else if(attr == s_number) {
             double value;
