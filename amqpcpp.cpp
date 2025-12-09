@@ -28,6 +28,11 @@ enum {
     s_uint16 = 8,
     s_uint32 = 9,
     s_uint64 = 10,
+    s_int8 = 11,
+    s_int16 = 12,
+    s_int32 = 13,
+    s_int64 = 14,
+    s_float = 15,
 };
 
 void lua_push_error(lua_State* L, const std::string& error)
@@ -173,53 +178,14 @@ void lua_pop_table_to_stream(lua_State *L, StringStreamBuf& result)
     return;
 }
 
-bool getUChar(const char* stream, size_t& size, unsigned char& attr, size_t maxSize)
+template<class T>
+bool get(const char* stream, size_t& size, T& attr, size_t maxSize)
 {
     if(size >= maxSize)
         return false;
 
-    attr = *(unsigned char*)(stream + size);
-    size++;
-    return true;
-}
-
-bool getU16(const char* stream, size_t& size, uint16_t& attr, size_t maxSize)
-{
-    if(size + 2 >= maxSize)
-        return false;
-
-    attr = *(uint16_t*)(stream + size);
-    size += 2;
-    return true;
-}
-
-bool getU32(const char* stream, size_t& size, uint32_t& attr, size_t maxSize)
-{
-    if(size + 4 >= maxSize)
-        return false;
-
-    attr = *(uint32_t*)(stream + size);
-    size += 4;
-    return true;
-}
-
-bool getU64(const char* stream, size_t& size, uint64_t& attr, size_t maxSize)
-{
-    if(size + 8 >= maxSize)
-        return false;
-
-    attr = *(uint64_t*)(stream + size);
-    size += 8;
-    return true;
-}
-
-bool getDouble(const char* stream, size_t& size, double& attr, size_t maxSize)
-{
-    if(size + sizeof(double) >= maxSize)
-        return false;
-
-    attr = *((double*)(stream + size));
-    size += sizeof(double);
+    attr = *(T*)(stream + size);
+    size += sizeof(T);
     return true;
 }
 
@@ -266,9 +232,9 @@ void streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSiz
     lua_newtable(L);
 
     int oldTop = lua_gettop(L);
-    unsigned char attr;
+    uint8_t attr;
 
-    while(getUChar(stream, size, attr, maxSize)) {
+    while(get<uint8_t>(stream, size, attr, maxSize)) {
         if(attr == 255) // this is just to signal that we are using stream
             continue;
 
@@ -278,7 +244,7 @@ void streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSiz
         } else if(attr == s_uint8) {
             uint8_t value;
 
-            if(!getUChar(stream, size, value, maxSize)) {
+            if(!get<uint8_t>(stream, size, value, maxSize)) {
                 lua_push_error(L, "streamToTable !stream.uint8(value) ");
                 break;
             }
@@ -288,7 +254,7 @@ void streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSiz
         } else if(attr == s_uint16) {
             uint16_t value;
 
-            if(!getU16(stream, size, value, maxSize)) {
+            if(!get<uint16_t>(stream, size, value, maxSize)) {
                 lua_push_error(L, "streamToTable !stream.uint16(value) ");
                 break;
             }
@@ -298,7 +264,7 @@ void streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSiz
         } else if(attr == s_uint32) {
             uint32_t value;
 
-            if(!getU32(stream, size, value, maxSize)) {
+            if(!get<uint32_t>(stream, size, value, maxSize)) {
                 lua_push_error(L, "streamToTable !stream.uint32(value) ");
                 break;
             }
@@ -308,19 +274,68 @@ void streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSiz
         } else if(attr == s_uint64) {
             uint64_t value;
 
-            if(!getU64(stream, size, value, maxSize)) {
+            if(!get<uint64_t>(stream, size, value, maxSize)) {
                 lua_push_error(L, "streamToTable !stream.uint64(value) ");
                 break;
             }
 
             lua_pushnumber(L, value);
 
-
         } else if(attr == s_number) {
             double value;
 
-            if(!getDouble(stream, size, value, maxSize)) {
+            if(!get<double>(stream, size, value, maxSize)) {
                 lua_push_error(L, "streamToTable !stream.getDouble(value) ");
+                break;
+            }
+
+            lua_pushnumber(L, value);
+
+        } else if(attr == s_int8) {
+            int8_t value;
+
+            if(!get<int8_t>(stream, size, value, maxSize)) {
+                lua_push_error(L, "streamToTable !stream.s_int8(value) ");
+                break;
+            }
+
+            lua_pushnumber(L, value);
+
+        } else if(attr == s_int16) {
+            int16_t value;
+
+            if(!get<int16_t>(stream, size, value, maxSize)) {
+                lua_push_error(L, "streamToTable !stream.s_int16(value) ");
+                break;
+            }
+
+            lua_pushnumber(L, value);
+
+        } else if(attr == s_int32) {
+            int32_t value;
+
+            if(!get<int32_t>(stream, size, value, maxSize)) {
+                lua_push_error(L, "streamToTable !stream.s_int32(value) ");
+                break;
+            }
+
+            lua_pushnumber(L, value);
+
+        } else if(attr == s_int64) {
+            int64_t value;
+
+            if(!get<int64_t>(stream, size, value, maxSize)) {
+                lua_push_error(L, "streamToTable !stream.s_int64(value) ");
+                break;
+            }
+
+            lua_pushnumber(L, value);
+
+        } else if(attr == s_float) {
+            float value;
+
+            if(!get<float>(stream, size, value, maxSize)) {
+                lua_push_error(L, "streamToTable !stream.s_float(value) ");
                 break;
             }
 
@@ -349,7 +364,7 @@ void streamToTable(const char* stream, lua_State* L, size_t& size, size_t maxSiz
         } else if(attr == s_boolean) {
             uint8_t value;
 
-            if(!getUChar(stream, size, value, maxSize)) {
+            if(!get<uint8_t>(stream, size, value, maxSize)) {
                 lua_push_error(L, "streamToTable !stream.getUChar(value) ");
                 break;
             }
