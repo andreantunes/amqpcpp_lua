@@ -10,6 +10,7 @@
 #include <thread>
 #include <list>
 #include <unordered_set>
+#include <cfloat>
 
 extern "C" {
   #include "lua.h"
@@ -63,10 +64,69 @@ void tableValueToStream(lua_State* L, std::ostream& stream, int index)
         stream.write((char*)&b, 1);
 
     } else if(type == LUA_TNUMBER) {
-        char k = s_number;
-        stream.write(&k, 1);
-        double value = lua_tonumber(L, index);
-        stream.write((char*)&value, sizeof(double));
+        double number = lua_tonumber(L, index);
+        char k;
+
+        // Double use 53 bits of precision, so only integers in the
+        // range -(2^53 -1) to 2^53 -1 can be precisely represented.
+        constexpr double minSafeInteger = -9007199254740991.0; // -(2^53 -1)
+        constexpr double maxSafeInteger = 9007199254740991.0;  // 2^53 -1
+
+        bool isInteger = std::trunc(number) == number;
+        if(isInteger && number >= minSafeInteger && number <= maxSafeInteger) {
+            if(number < 0) {
+                if(number >= INT8_MIN) {
+                    k = s_int8;
+                    int8_t value = static_cast<int8_t>(number);
+                    stream.write(&k, 1);
+                    stream.write((char*)&value, sizeof(value));
+                } else if(number >= INT16_MIN) {
+                    k = s_int16;
+                    int16_t value = static_cast<int16_t>(number);
+                    stream.write(&k, 1);
+                    stream.write((char*)&value, sizeof(value));
+                } else if(number >= INT32_MIN) {
+                    k = s_int32;
+                    int32_t value = static_cast<int32_t>(number);
+                    stream.write(&k, 1);
+                    stream.write((char*)&value, sizeof(value));
+                } else {
+                    k = s_int64;
+                    int64_t value = static_cast<int64_t>(number);
+                    stream.write(&k, 1);
+                    stream.write((char*)&value, sizeof(value));
+                }
+            } else if(number <= UINT8_MAX) {
+                k = s_uint8;
+                uint8_t value = static_cast<uint8_t>(number);
+                stream.write(&k, 1);
+                stream.write((char*)&value, sizeof(value));
+            } else if(number <= UINT16_MAX) {
+                k = s_uint16;
+                uint16_t value = static_cast<uint16_t>(number);
+                stream.write(&k, 1);
+                stream.write((char*)&value, sizeof(value));
+            } else if(number <= UINT32_MAX) {
+                k = s_uint32;
+                uint32_t value = static_cast<uint32_t>(number);
+                stream.write(&k, 1);
+                stream.write((char*)&value, sizeof(value));
+            } else {
+                k = s_uint64;
+                uint64_t value = static_cast<uint64_t>(number);
+                stream.write(&k, 1);
+                stream.write((char*)&value, sizeof(value));
+            }
+        } else if(number >= FLT_MIN && number <= FLT_MAX && static_cast<double>(static_cast<float>(number)) == number) {
+            k = s_float;
+            float value = static_cast<float>(number);
+            stream.write(&k, 1);
+            stream.write((char*)&value, sizeof(value));
+        } else {
+            k = s_number;
+            stream.write(&k, 1);
+            stream.write((char*)&number, sizeof(number));
+        }
 
     } else if(type == LUA_TSTRING) {
         size_t size = 0;
